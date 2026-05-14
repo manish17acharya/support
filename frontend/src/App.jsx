@@ -16,12 +16,15 @@ const TWEAK_DEFAULTS = {
 };
 
 const ROLE_HOME = {
-  Client: "client-home",
-  CSR: "dashboard",
-  Bridge: "bridge",
-  Developer: "dev",
-  QA: "dev",
-  Admin: "analytics",
+  Client:     "client-home",
+  CSR:        "dashboard",
+  Bridge:     "bridge",
+  Developer:  "dev",
+  QA:         "dev",
+  Admin:      "analytics",
+  SuperAdmin: "users",
+  Manager:    "analytics",
+  Supervisor: "dashboard",
 };
 
 export default function App() {
@@ -73,7 +76,7 @@ export default function App() {
   } else if (view === "dashboard") {
     content = <CSRDashboard openTicket={openTicket} setView={setView} />;
   } else if (view === "tickets") {
-    content = <TicketsList openTicket={openTicket} filterRole={role} />;
+    content = <TicketsList openTicket={openTicket} filterRole={role} setView={setView} />;
   } else if (view === "new-ticket") {
     content = <NewTicketForm back={closeTicket} />;
   } else if (view === "bridge") {

@@ -1,10 +1,11 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import api from './api';
 import * as I from './icons';
 import {
   Avatar, StatusPill, PriorityBadge, ChannelIcon, CategoryIcon,
   Tag, SLATag, SLABar, formatMin, Card, Stat, PageHeader, Sparkline, LineChart
 } from './components';
-import { useAnalytics, useKbArticles, useCompanies, useUsers, useTickets } from './hooks';
+import { useAnalytics, useKbArticles, useCompanies, useUsers, useTickets, useLookups } from './hooks';
 import { useAuth } from './AuthContext';
 
 // ====================================================================
@@ -206,16 +207,153 @@ export function Analytics() {
 // ====================================================================
 //   KNOWLEDGE BASE
 // ====================================================================
+
+function KbArticleModal({ article, onClose, onSaved }) {
+  const isEdit = !!article;
+  const [title,    setTitle]    = useState(article?.title    ?? '');
+  const [content,  setContent]  = useState(article?.content  ?? '');
+  const [category, setCategory] = useState(article?.category ?? '');
+  const [status,   setStatus]   = useState(article?.status   ?? 'Draft');
+  const [saving,   setSaving]   = useState(false);
+  const [error,    setError]    = useState(null);
+
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  async function handleSave() {
+    if (!title.trim() || !content.trim()) { setError('Title and content are required'); return; }
+    setSaving(true); setError(null);
+    try {
+      if (isEdit) await api.put(`/kb-articles/${article.id}`, { title, content, category: category || null, status });
+      else        await api.post('/kb-articles', { title, content, category: category || null, status });
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err.response?.data?.message ?? 'Save failed');
+      setSaving(false);
+    }
+  }
+
+  return (
+    <AdminModal title={isEdit ? 'Edit article' : 'New KB article'} onClose={onClose} width={640}>
+      <div className="col gap-4">
+        <AdminField label="Title" required>
+          <input className="input" value={title} onChange={e => setTitle(e.target.value)} placeholder="Article title…" autoFocus />
+        </AdminField>
+        <div className="grid-2" style={{ gap: 12 }}>
+          <AdminField label="Category">
+            <input className="input" value={category} onChange={e => setCategory(e.target.value)} placeholder="e.g. Billing, Auth…" />
+          </AdminField>
+          <AdminField label="Status">
+            <select className="select" value={status} onChange={e => setStatus(e.target.value)}>
+              <option value="Draft">Draft</option>
+              <option value="Published">Published</option>
+              <option value="Archived">Archived</option>
+            </select>
+          </AdminField>
+        </div>
+        <AdminField label="Content" required>
+          <textarea className="textarea" value={content} onChange={e => setContent(e.target.value)}
+            placeholder="Article body (markdown supported)…"
+            style={{ minHeight: 200 }} />
+        </AdminField>
+        {error && <div style={{ fontSize: 12.5, color: 'var(--sla-breach)' }}>{error}</div>}
+        <div className="row gap-2" style={{ justifyContent: 'flex-end' }}>
+          <button className="btn" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn primary" onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create article'}
+          </button>
+        </div>
+      </div>
+    </AdminModal>
+  );
+}
+
+function KbRowMenu({ article, onEdit, onReload }) {
+  const [open,    setOpen]    = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onMD(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener('mousedown', onMD);
+    return () => document.removeEventListener('mousedown', onMD);
+  }, [open]);
+
+  async function setStatus(status) {
+    setOpen(false);
+    await api.put(`/kb-articles/${article.id}`, { status });
+    onReload();
+  }
+
+  async function deleteArticle() {
+    setConfirm(false);
+    await api.delete(`/kb-articles/${article.id}`);
+    onReload();
+  }
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button className="btn ghost icon" onClick={e => { e.stopPropagation(); setOpen(o => !o); }}>
+        <I.MoreH size={14} />
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', right: 0, top: '100%', marginTop: 4,
+          background: 'var(--panel)', border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-md)', boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+          minWidth: 160, zIndex: 100,
+        }}>
+          <div className="dropdown-item" onClick={() => { setOpen(false); onEdit(article); }}>
+            <I.Edit size={13} /> Edit
+          </div>
+          {article.status !== 'Published' && (
+            <div className="dropdown-item" style={{ color: 'var(--sla-ok)' }} onClick={() => setStatus('Published')}>
+              <I.CheckCircle size={13} /> Publish
+            </div>
+          )}
+          {article.status !== 'Archived' && (
+            <div className="dropdown-item" onClick={() => setStatus('Archived')}>
+              <I.Trash size={13} /> Archive
+            </div>
+          )}
+          <div className="dropdown-item" style={{ color: 'var(--sla-breach)' }}
+            onClick={() => { setOpen(false); setConfirm(true); }}>
+            <I.Trash size={13} /> Delete
+          </div>
+        </div>
+      )}
+      {confirm && (
+        <AdminModal title="Delete article?" onClose={() => setConfirm(false)} width={400}>
+          <p style={{ fontSize: 13.5, color: 'var(--text)', marginBottom: 20 }}>
+            This will permanently delete <strong>"{article.title}"</strong>.
+          </p>
+          <div className="row gap-2" style={{ justifyContent: 'flex-end' }}>
+            <button className="btn" onClick={() => setConfirm(false)}>Cancel</button>
+            <button className="btn" style={{ background: 'var(--sla-breach)', color: '#fff', borderColor: 'var(--sla-breach)' }} onClick={deleteArticle}>Delete</button>
+          </div>
+        </AdminModal>
+      )}
+    </div>
+  );
+}
+
 export function KnowledgeBase({ openTicket }) {
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
+  const [editing, setEditing] = useState(null);
+  const [showNew, setShowNew] = useState(false);
 
   React.useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(q), 300);
     return () => clearTimeout(t);
   }, [q]);
 
-  const { articles, loading } = useKbArticles(debouncedQ);
+  const { articles, loading, reload } = useKbArticles(debouncedQ);
 
   const cats = [...new Set(articles.map((a) => a.category).filter(Boolean))];
 
@@ -227,7 +365,7 @@ export function KnowledgeBase({ openTicket }) {
         actions={
           <>
             <button className="btn"><I.Download size={14} /> Export</button>
-            <button className="btn primary"><I.Plus size={14} /> New article</button>
+            <button className="btn primary" onClick={() => setShowNew(true)}><I.Plus size={14} /> New article</button>
           </>
         }
       />
@@ -298,7 +436,7 @@ export function KnowledgeBase({ openTicket }) {
                       <td style={{ fontSize: 12, color: "var(--text-muted)" }}>
                         {kb.updated_at ? new Date(kb.updated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}
                       </td>
-                      <td><button className="btn ghost icon"><I.MoreH size={14} /></button></td>
+                      <td><KbRowMenu article={kb} onEdit={setEditing} onReload={reload} /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -307,6 +445,9 @@ export function KnowledgeBase({ openTicket }) {
           )}
         </div>
       </div>
+
+      {showNew && <KbArticleModal onClose={() => setShowNew(false)} onSaved={reload} />}
+      {editing  && <KbArticleModal article={editing} onClose={() => setEditing(null)} onSaved={reload} />}
     </div>
   );
 }
@@ -314,65 +455,324 @@ export function KnowledgeBase({ openTicket }) {
 // ====================================================================
 //   CLIENT PORTAL VIEW
 // ====================================================================
+
+// Friendly status labels shown to clients
+const CLIENT_STATUS_LABELS = {
+  New:                    { label: 'Submitted',         color: 'var(--status-new)' },
+  Open:                   { label: 'In progress',       color: 'var(--status-open)' },
+  WaitingClient:          { label: 'Awaiting your reply', color: 'var(--sla-warn)' },
+  EscalatedDev:           { label: 'Under review',      color: 'var(--status-escalated)' },
+  UnderReview:            { label: 'Under review',      color: 'var(--status-review)' },
+  DeferredSprint:         { label: 'Scheduled',         color: 'var(--status-sprint)' },
+  InDevelopment:          { label: 'Being fixed',       color: 'var(--status-dev)' },
+  InQA:                   { label: 'Being tested',      color: 'var(--status-qa)' },
+  ReadyDeploy:            { label: 'Fix ready',         color: 'var(--status-deploy)' },
+  Deployed:               { label: 'Fix deployed',      color: 'var(--status-deployed)' },
+  Resolved:               { label: 'Resolved',          color: 'var(--sla-ok)' },
+  Closed:                 { label: 'Closed',            color: 'var(--text-muted)' },
+};
+
+function ClientStatusBadge({ status }) {
+  const info = CLIENT_STATUS_LABELS[status] ?? { label: status, color: 'var(--text-muted)' };
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      padding: '3px 10px', borderRadius: 999, fontSize: 11.5,
+      background: `color-mix(in oklch, ${info.color} 12%, transparent)`,
+      color: info.color,
+    }}>
+      <span style={{ width: 6, height: 6, borderRadius: 999, background: info.color, flexShrink: 0 }}></span>
+      {info.label}
+    </span>
+  );
+}
+
+// CSAT star rating widget
+function CsatWidget({ ticketId, existingScore, existingComment, onRated }) {
+  const [hover, setHover]     = useState(0);
+  const [selected, setSelected] = useState(existingScore ?? 0);
+  const [comment, setComment] = useState(existingComment ?? '');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted]   = useState(!!existingScore);
+
+  async function handleSubmit(score) {
+    setSubmitting(true);
+    try {
+      await api.post(`/tickets/${ticketId}/rate`, { csat_score: score, csat_comment: comment });
+      setSelected(score);
+      setSubmitted(true);
+      if (onRated) onRated(score);
+    } catch {}
+    finally { setSubmitting(false); }
+  }
+
+  if (submitted) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 0' }}>
+        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>You rated this</span>
+        {[1,2,3,4,5].map(n => (
+          <I.Star key={n} size={16} style={{ color: n <= selected ? '#f59e0b' : 'var(--border-strong)', fill: n <= selected ? '#f59e0b' : 'none' }} />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding: '12px 0' }}>
+      <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8 }}>How did we do? Rate this ticket</div>
+      <div className="row gap-1" style={{ marginBottom: 8 }}>
+        {[1,2,3,4,5].map(n => (
+          <button
+            key={n}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2 }}
+            onMouseEnter={() => setHover(n)}
+            onMouseLeave={() => setHover(0)}
+            onClick={() => !submitting && handleSubmit(n)}
+            disabled={submitting}
+          >
+            <I.Star size={24} style={{
+              color: n <= (hover || selected) ? '#f59e0b' : 'var(--border-strong)',
+              fill:  n <= (hover || selected) ? '#f59e0b' : 'none',
+              transition: 'color 0.1s',
+            }} />
+          </button>
+        ))}
+        <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 8, alignSelf: 'center' }}>
+          {hover ? ['','Terrible','Poor','Okay','Good','Excellent!'][hover] : 'Click to rate'}
+        </span>
+      </div>
+      {selected > 0 && (
+        <div>
+          <textarea
+            className="textarea"
+            placeholder="Any additional feedback? (optional)"
+            value={comment}
+            onChange={e => setComment(e.target.value)}
+            style={{ minHeight: 60, marginBottom: 8 }}
+          />
+          <button className="btn primary sm" onClick={() => handleSubmit(selected)} disabled={submitting}>
+            {submitting ? 'Submitting…' : 'Submit rating'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Client new ticket form
+function ClientNewTicketForm({ onClose, onCreated }) {
+  const { lookups, loading: lookupsLoading } = useLookups();
+  const [title, setTitle]       = useState('');
+  const [description, setDesc]  = useState('');
+  const [priorityId, setPriority] = useState(null);
+  const [categoryId, setCategory] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [errors, setErrors]     = useState({});
+
+  useEffect(() => {
+    if (!lookups) return;
+    if (!priorityId) {
+      const med = lookups.priorities?.find(p => p.name === 'Medium');
+      if (med) setPriority(med.id);
+    }
+    if (!categoryId && lookups.categories?.length) setCategory(String(lookups.categories[0].id));
+  }, [lookups]);
+
+  async function handleSubmit() {
+    const local = {};
+    if (!title.trim())       local.title = 'Subject is required';
+    if (!description.trim()) local.description = 'Description is required';
+    if (!priorityId)         local.priority_id = 'Priority is required';
+    if (!categoryId)         local.category_id = 'Category is required';
+    if (Object.keys(local).length) { setErrors(local); return; }
+
+    // default channel to Web Form
+    const webChannel = lookups?.channels?.find(c => c.name === 'Web Form') ?? lookups?.channels?.[0];
+
+    setSubmitting(true);
+    try {
+      await api.post('/tickets', {
+        title:             title.trim(),
+        description:       description.trim(),
+        priority_id:       priorityId,
+        category_id:       parseInt(categoryId),
+        intake_channel_id: webChannel?.id,
+        contact_email:     '',
+      });
+      onCreated();
+    } catch (err) {
+      const data = err.response?.data;
+      if (data?.errors) setErrors(data.errors);
+      else setErrors({ general: data?.message ?? 'Failed to create ticket' });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <AdminModal title="New support request" onClose={onClose} width={560}>
+      <div className="col gap-3">
+        <AdminField label="Subject" required>
+          <input className="input" placeholder="Brief description of your issue" maxLength={255}
+            value={title} onChange={e => setTitle(e.target.value)}
+            style={errors.title ? { borderColor: 'var(--sla-breach)' } : {}} />
+          {errors.title && <div style={{ fontSize: 11.5, color: 'var(--sla-breach)', marginTop: 3 }}>{Array.isArray(errors.title) ? errors.title[0] : errors.title}</div>}
+        </AdminField>
+        <AdminField label="Description" required>
+          <textarea className="textarea" placeholder="Please describe your issue in detail — what happened, what you expected, any steps to reproduce…"
+            style={{ minHeight: 120, ...(errors.description ? { borderColor: 'var(--sla-breach)' } : {}) }}
+            value={description} onChange={e => setDesc(e.target.value)} />
+          {errors.description && <div style={{ fontSize: 11.5, color: 'var(--sla-breach)', marginTop: 3 }}>{Array.isArray(errors.description) ? errors.description[0] : errors.description}</div>}
+        </AdminField>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <AdminField label="Category" required>
+            <select className="select" value={categoryId} onChange={e => setCategory(e.target.value)} disabled={lookupsLoading}>
+              {lookupsLoading ? <option>Loading…</option> : lookups?.categories?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </AdminField>
+          <AdminField label="Urgency" required>
+            <select className="select" value={priorityId ?? ''} onChange={e => setPriority(parseInt(e.target.value))} disabled={lookupsLoading}>
+              {lookupsLoading ? <option>Loading…</option> : lookups?.priorities?.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </AdminField>
+        </div>
+        {errors.general && <div style={{ fontSize: 12, color: 'var(--sla-breach)' }}>{errors.general}</div>}
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 12px', background: 'var(--bg-sunken)', borderRadius: 'var(--radius-md)' }}>
+          <I.Mail size={11} style={{ marginRight: 6, verticalAlign: 'middle' }} />
+          You'll receive a confirmation with your ticket number. You can reply via email at any time.
+        </div>
+        <div className="row gap-2" style={{ justifyContent: 'flex-end', marginTop: 4 }}>
+          <button className="btn" onClick={onClose} disabled={submitting}>Cancel</button>
+          <button className="btn primary" onClick={handleSubmit} disabled={submitting || lookupsLoading}>
+            <I.Send size={13} /> {submitting ? 'Submitting…' : 'Submit request'}
+          </button>
+        </div>
+      </div>
+    </AdminModal>
+  );
+}
+
 export function ClientPortal({ openTicket }) {
   const { user } = useAuth();
   const companyId = user?.client_company_id ?? null;
+  const [showNewForm, setShowNewForm] = useState(false);
 
   const params = useMemo(() => {
     if (!companyId) return {};
-    return { company_id: companyId, per_page: 50 };
+    return { company_id: companyId, per_page: 100 };
   }, [companyId]);
 
-  const { tickets, loading } = useTickets(params);
+  const { tickets, loading, reload } = useTickets(params);
 
-  const openCount      = tickets.filter(t => !['Resolved','Deployed','Closed'].includes(t.status) && t.status !== 'Closed').length;
-  const waitingCount   = tickets.filter(t => t.status === 'WaitingClient').length;
-  const resolvedCount  = tickets.filter(t => ['Resolved','Deployed','Closed'].includes(t.status)).length;
+  const CLOSED = ['Resolved','Deployed','Closed'];
+  const openCount     = tickets.filter(t => !CLOSED.includes(t.status)).length;
+  const waitingCount  = tickets.filter(t => t.status === 'WaitingClient').length;
+  const resolvedCount = tickets.filter(t => CLOSED.includes(t.status)).length;
+
+  // separate open and closed tickets
+  const openTickets   = tickets.filter(t => !CLOSED.includes(t.status));
+  const closedTickets = tickets.filter(t => CLOSED.includes(t.status));
 
   return (
     <div>
       <PageHeader
-        title="Your support tickets"
-        subtitle={user?.name ? `${user.name}` : 'Client portal'}
-        actions={<button className="btn primary"><I.Plus size={14} /> New request</button>}
+        title="My support tickets"
+        subtitle={user?.name ?? 'Client portal'}
+        actions={
+          <button className="btn primary" onClick={() => setShowNewForm(true)}>
+            <I.Plus size={14} /> New request
+          </button>
+        }
       />
-      <div className="page-content" style={{ maxWidth: 920 }}>
-        <div className="grid-3" style={{ marginBottom: 20 }}>
+      <div className="page-content" style={{ maxWidth: 960 }}>
+        <div className="grid-3" style={{ marginBottom: 24 }}>
           <Stat label="Open"              value={loading ? '…' : openCount}     icon={<I.Clock size={13} />} />
-          <Stat label="Awaiting your reply" value={loading ? '…' : waitingCount} icon={<I.MessageSquare size={13} />} />
+          <Stat label="Awaiting your reply" value={loading ? '…' : waitingCount} icon={<I.MessageSquare size={13} />} valueColor="var(--sla-warn)" />
           <Stat label="Resolved (all time)" value={loading ? '…' : resolvedCount} icon={<I.CheckCircle size={13} />} valueColor="var(--sla-ok)" />
         </div>
 
         {loading ? (
           <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>Loading tickets…</div>
         ) : tickets.length === 0 ? (
-          <div className="empty">No tickets found for your account</div>
+          <div style={{ padding: 48, textAlign: 'center' }}>
+            <div style={{ fontSize: 32, marginBottom: 12 }}>🎉</div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-strong)', marginBottom: 6 }}>No tickets yet</div>
+            <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 20 }}>Submit a request and our team will be in touch.</div>
+            <button className="btn primary" onClick={() => setShowNewForm(true)}><I.Plus size={14} /> Submit your first request</button>
+          </div>
         ) : (
-          <div className="col gap-3">
-            {tickets.map((t) => (
-              <div key={t.id} className="card" style={{ padding: 16, cursor: "pointer" }} onClick={() => openTicket(t.id)}>
-                <div className="row gap-3" style={{ marginBottom: 8 }}>
-                  <span className="mono" style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{t.ticket_id}</span>
-                  <StatusPill status={t.status} />
-                  <PriorityBadge priority={t.priority} />
-                  <span style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--text-muted)" }} className="mono">
-                    {formatMin(t.createdMinAgo)} ago
-                  </span>
-                </div>
-                <div style={{ fontSize: 15, fontWeight: 600, color: "var(--text-strong)", marginBottom: 6 }}>{t.title}</div>
-                <div style={{ fontSize: 13, color: "var(--text-muted)", lineHeight: 1.5 }}>{(t.description ?? '').slice(0, 180)}{t.description?.length > 180 ? '…' : ''}</div>
-                <div className="row gap-3" style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--divider)", fontSize: 12, color: "var(--text-muted)" }}>
-                  {t.csr && <span><I.User size={11} style={{ marginRight: 4, verticalAlign: "middle" }} />Handled by {t.csr.name}</span>}
-                  <span><I.MessageSquare size={11} style={{ marginRight: 4, verticalAlign: "middle" }} />{t.commentCount} replies</span>
-                  <span style={{ marginLeft: "auto" }} className="row gap-1">
-                    View ticket <I.ChevronRight size={12} />
-                  </span>
+          <div className="col gap-4">
+            {openTickets.length > 0 && (
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 10 }}>Active</div>
+                <div className="col gap-3">
+                  {openTickets.map(t => <ClientTicketCard key={t.id} t={t} openTicket={openTicket} onRated={reload} />)}
                 </div>
               </div>
-            ))}
+            )}
+            {closedTickets.length > 0 && (
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 10 }}>Resolved</div>
+                <div className="col gap-3">
+                  {closedTickets.map(t => <ClientTicketCard key={t.id} t={t} openTicket={openTicket} onRated={reload} />)}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      {showNewForm && (
+        <ClientNewTicketForm
+          onClose={() => setShowNewForm(false)}
+          onCreated={() => { setShowNewForm(false); reload(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ClientTicketCard({ t, openTicket, onRated }) {
+  const CLOSED = ['Resolved','Deployed','Closed'];
+  const isClosed = CLOSED.includes(t.status);
+  const needsRating = isClosed && !t.csat_score;
+
+  return (
+    <div className="card" style={{ padding: 20 }}>
+      <div className="row gap-3" style={{ marginBottom: 10, flexWrap: 'wrap' }}>
+        <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{t.ticket_id}</span>
+        <ClientStatusBadge status={t.status} />
+        {t.priority && <PriorityBadge priority={t.priority} />}
+        <span style={{ marginLeft: 'auto', fontSize: 11.5, color: 'var(--text-muted)' }} className="mono">
+          {formatMin(t.createdMinAgo)} ago
+        </span>
+      </div>
+      <div
+        style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-strong)', marginBottom: 6, cursor: 'pointer' }}
+        onClick={() => openTicket(t.id)}
+      >
+        {t.title}
+      </div>
+      <div style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 12 }}>
+        {(t.description ?? '').slice(0, 180)}{(t.description?.length ?? 0) > 180 ? '…' : ''}
+      </div>
+      <div className="row gap-3" style={{ paddingTop: 12, borderTop: '1px solid var(--divider)', fontSize: 12, color: 'var(--text-muted)', flexWrap: 'wrap' }}>
+        {t.csr && <span><I.User size={11} style={{ marginRight: 4, verticalAlign: 'middle' }} />Handled by {t.csr.name}</span>}
+        <span><I.MessageSquare size={11} style={{ marginRight: 4, verticalAlign: 'middle' }} />{t.commentCount ?? 0} replies</span>
+        <button className="btn ghost sm" style={{ marginLeft: 'auto' }} onClick={() => openTicket(t.id)}>
+          View ticket <I.ChevronRight size={12} />
+        </button>
+      </div>
+      {needsRating && (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--divider)' }}>
+          <CsatWidget ticketId={t.id} onRated={onRated} />
+        </div>
+      )}
+      {isClosed && t.csat_score && (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--divider)' }}>
+          <CsatWidget ticketId={t.id} existingScore={t.csat_score} existingComment={t.csat_comment} />
+        </div>
+      )}
     </div>
   );
 }
@@ -380,8 +780,121 @@ export function ClientPortal({ openTicket }) {
 // ====================================================================
 //   COMPANIES / USERS / AUDIT (admin)
 // ====================================================================
+function CompanyModal({ company, onClose, onSaved }) {
+  const isEdit = !!company;
+  const [name,  setName]  = useState(company?.name          ?? '');
+  const [email, setEmail] = useState(company?.primary_email ?? '');
+  const [phone, setPhone] = useState(company?.phone         ?? '');
+  const [isVip, setIsVip] = useState(company?.is_vip        ?? false);
+  const [saving, setSaving] = useState(false);
+  const [error,  setError]  = useState(null);
+
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  async function handleSave() {
+    if (!name.trim()) { setError('Company name is required'); return; }
+    setSaving(true); setError(null);
+    try {
+      if (isEdit) await api.put(`/companies/${company.id}`, { name, primary_email: email || null, phone: phone || null, is_vip: isVip });
+      else        await api.post('/companies', { name, primary_email: email || null, phone: phone || null, is_vip: isVip });
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err.response?.data?.message ?? 'Save failed');
+      setSaving(false);
+    }
+  }
+
+  return (
+    <AdminModal title={isEdit ? 'Edit company' : 'Add company'} onClose={onClose}>
+      <div className="col gap-4">
+        <AdminField label="Company name" required>
+          <input className="input" value={name} onChange={e => setName(e.target.value)} placeholder="Acme Corp" autoFocus />
+        </AdminField>
+        <AdminField label="Primary email">
+          <input className="input" type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="contact@acme.com" />
+        </AdminField>
+        <AdminField label="Phone">
+          <input className="input" value={phone} onChange={e => setPhone(e.target.value)} placeholder="+1 555 000 0000" />
+        </AdminField>
+        <label className="row gap-2" style={{ fontSize: 13, cursor: 'pointer' }}>
+          <input type="checkbox" checked={isVip} onChange={e => setIsVip(e.target.checked)} />
+          VIP account (priority support)
+        </label>
+        {error && <div style={{ fontSize: 12.5, color: 'var(--sla-breach)' }}>{error}</div>}
+        <div className="row gap-2" style={{ justifyContent: 'flex-end' }}>
+          <button className="btn" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn primary" onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Add company'}
+          </button>
+        </div>
+      </div>
+    </AdminModal>
+  );
+}
+
+function CompanyRowMenu({ company, onEdit, onReload }) {
+  const [open,    setOpen]    = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onMD(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener('mousedown', onMD);
+    return () => document.removeEventListener('mousedown', onMD);
+  }, [open]);
+
+  async function deleteCompany() {
+    setConfirm(false);
+    await api.delete(`/companies/${company.id}`);
+    onReload();
+  }
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button className="btn ghost icon" onClick={e => { e.stopPropagation(); setOpen(o => !o); }}>
+        <I.MoreH size={14} />
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', right: 0, top: '100%', marginTop: 4,
+          background: 'var(--panel)', border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-md)', boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+          minWidth: 150, zIndex: 100,
+        }}>
+          <div className="dropdown-item" onClick={() => { setOpen(false); onEdit(company); }}>
+            <I.Edit size={13} /> Edit
+          </div>
+          <div className="dropdown-item" style={{ color: 'var(--sla-breach)' }}
+            onClick={() => { setOpen(false); setConfirm(true); }}>
+            <I.Trash size={13} /> Delete
+          </div>
+        </div>
+      )}
+      {confirm && (
+        <AdminModal title="Delete company?" onClose={() => setConfirm(false)} width={400}>
+          <p style={{ fontSize: 13.5, color: 'var(--text)', marginBottom: 20 }}>
+            Delete <strong>{company.name}</strong>? This cannot be undone.
+          </p>
+          <div className="row gap-2" style={{ justifyContent: 'flex-end' }}>
+            <button className="btn" onClick={() => setConfirm(false)}>Cancel</button>
+            <button className="btn" style={{ background: 'var(--sla-breach)', color: '#fff', borderColor: 'var(--sla-breach)' }} onClick={deleteCompany}>Delete</button>
+          </div>
+        </AdminModal>
+      )}
+    </div>
+  );
+}
+
 export function CompaniesView() {
   const { companies, loading, error, reload } = useCompanies();
+  const [editing, setEditing] = useState(null);
+  const [showNew, setShowNew] = useState(false);
 
   return (
     <div>
@@ -391,7 +904,7 @@ export function CompaniesView() {
         actions={
           <>
             <button className="btn" onClick={reload} disabled={loading}><I.Refresh size={14} /> Refresh</button>
-            <button className="btn primary"><I.Plus size={14} /> Add company</button>
+            <button className="btn primary" onClick={() => setShowNew(true)}><I.Plus size={14} /> Add company</button>
           </>
         }
       />
@@ -428,7 +941,7 @@ export function CompaniesView() {
                           ? <span className="row gap-1"><I.Star size={11} style={{ color: "var(--sla-warn)", fill: "currentColor" }} /><span className="mono">{c.csat_avg}</span></span>
                           : <span style={{ color: 'var(--text-faint)' }}>—</span>}
                       </td>
-                      <td><button className="btn ghost icon"><I.MoreH size={14} /></button></td>
+                      <td><CompanyRowMenu company={c} onEdit={setEditing} onReload={reload} /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -437,75 +950,287 @@ export function CompaniesView() {
           </Card>
         )}
       </div>
+
+      {showNew && <CompanyModal onClose={() => setShowNew(false)} onSaved={reload} />}
+      {editing  && <CompanyModal company={editing} onClose={() => setEditing(null)} onSaved={reload} />}
     </div>
   );
 }
 
+// ---- admin modal shell ----
+function AdminModal({ title, onClose, children, width = 480 }) {
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 9999,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }} onClick={onClose}>
+      <div style={{
+        background: 'var(--panel)', border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-lg)', width, maxWidth: '95vw',
+        boxShadow: '0 24px 48px rgba(0,0,0,0.25)', padding: 24,
+      }} onClick={e => e.stopPropagation()}>
+        <div className="row gap-2" style={{ marginBottom: 20 }}>
+          <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-strong)' }}>{title}</span>
+          <button className="btn ghost icon" style={{ marginLeft: 'auto' }} onClick={onClose}><I.X size={14} /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function AdminField({ label, required, children }) {
+  return (
+    <div>
+      <label style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 500, display: 'block', marginBottom: 5 }}>
+        {label}{required && <span style={{ color: 'var(--sla-breach)', marginLeft: 3 }}>*</span>}
+      </label>
+      {children}
+    </div>
+  );
+}
+
+// ---- user 3-dot menu ----
+function UserRowMenu({ user, onEdit, onToggleActive }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    function onMD(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener('mousedown', onMD);
+    return () => document.removeEventListener('mousedown', onMD);
+  }, [open]);
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button className="btn ghost icon" onClick={e => { e.stopPropagation(); setOpen(o => !o); }}>
+        <I.MoreH size={14} />
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', right: 0, top: '100%', marginTop: 4,
+          background: 'var(--panel)', border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-md)', boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+          minWidth: 160, zIndex: 100,
+        }}>
+          <div className="dropdown-item" onClick={() => { setOpen(false); onEdit(user); }}>
+            <I.Edit size={13} /> Edit user
+          </div>
+          <div
+            className="dropdown-item"
+            style={{ color: user.is_active ? 'var(--sla-breach)' : 'var(--sla-ok)' }}
+            onClick={() => { setOpen(false); onToggleActive(user); }}
+          >
+            {user.is_active ? <><I.X size={13} /> Deactivate</> : <><I.Check size={13} /> Reactivate</>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- user invite / edit modal ----
+function UserModal({ user, onClose, onSaved }) {
+  const isEdit = !!user;
+  const [name, setName]         = useState(user?.name ?? '');
+  const [email, setEmail]       = useState(user?.email ?? '');
+  const [password, setPassword] = useState('');
+  const [role, setRole]         = useState(user?.role ?? 'CSR');
+  const [saving, setSaving]     = useState(false);
+  const [errors, setErrors]     = useState({});
+
+  const ALL_ROLES = ['SuperAdmin','Admin','Manager','Supervisor','CSR','Bridge','Developer','QA','Client'];
+
+  async function handleSave() {
+    const local = {};
+    if (!name.trim())  local.name = 'Name is required';
+    if (!email.trim()) local.email = 'Email is required';
+    if (!isEdit && !password.trim()) local.password = 'Password is required';
+    if (Object.keys(local).length) { setErrors(local); return; }
+
+    setSaving(true);
+    setErrors({});
+    try {
+      const payload = { name, email, role };
+      if (password) payload.password = password;
+      if (isEdit) {
+        await api.patch(`/users/${user.id}`, payload);
+      } else {
+        await api.post('/users', { ...payload, password });
+      }
+      onSaved();
+      onClose();
+    } catch (err) {
+      const data = err.response?.data;
+      if (data?.errors) setErrors(data.errors);
+      else setErrors({ general: data?.message ?? 'Save failed' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <AdminModal title={isEdit ? 'Edit user' : 'Invite user'} onClose={onClose}>
+      <div className="col gap-3">
+        <AdminField label="Full name" required>
+          <input className="input" value={name} onChange={e => setName(e.target.value)} autoFocus />
+          {errors.name && <div style={{ fontSize: 11.5, color: 'var(--sla-breach)', marginTop: 3 }}>{Array.isArray(errors.name) ? errors.name[0] : errors.name}</div>}
+        </AdminField>
+        <AdminField label="Email address" required>
+          <input className="input" type="email" value={email} onChange={e => setEmail(e.target.value)} />
+          {errors.email && <div style={{ fontSize: 11.5, color: 'var(--sla-breach)', marginTop: 3 }}>{Array.isArray(errors.email) ? errors.email[0] : errors.email}</div>}
+        </AdminField>
+        <AdminField label={isEdit ? 'New password (leave blank to keep)' : 'Password'} required={!isEdit}>
+          <input className="input" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder={isEdit ? 'Leave blank to keep current…' : 'Min 8 characters'} />
+          {errors.password && <div style={{ fontSize: 11.5, color: 'var(--sla-breach)', marginTop: 3 }}>{Array.isArray(errors.password) ? errors.password[0] : errors.password}</div>}
+        </AdminField>
+        <AdminField label="Role" required>
+          <select className="select" value={role} onChange={e => setRole(e.target.value)}>
+            {ALL_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
+        </AdminField>
+        {errors.general && <div style={{ fontSize: 12, color: 'var(--sla-breach)' }}>{errors.general}</div>}
+        <div className="row gap-2" style={{ justifyContent: 'flex-end', marginTop: 4 }}>
+          <button className="btn" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn primary" onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create user'}
+          </button>
+        </div>
+      </div>
+    </AdminModal>
+  );
+}
+
+// ---- role colour map ----
+const ROLE_COLORS = {
+  SuperAdmin: 'oklch(0.45 0.22 300)',
+  Admin:      'var(--accent)',
+  Manager:    'oklch(0.45 0.18 240)',
+  Supervisor: 'oklch(0.45 0.18 200)',
+  CSR:        'oklch(0.45 0.14 140)',
+  Bridge:     'oklch(0.55 0.18 70)',
+  Developer:  'oklch(0.45 0.2 250)',
+  QA:         'oklch(0.45 0.18 160)',
+  Client:     'var(--text-muted)',
+};
+
 export function UsersView() {
-  const { users, loading } = useUsers();
+  const { users, loading, reload } = useUsers();
+  const [modal, setModal]         = useState(null); // null | 'new' | user obj
+  const [filterRole, setFilterRole] = useState('');
+
+  const ROLE_STATS = [
+    { role: 'SuperAdmin', icon: <I.Shield size={13} /> },
+    { role: 'Admin',      icon: <I.Settings size={13} /> },
+    { role: 'Manager',    icon: <I.BarChart size={13} /> },
+    { role: 'Supervisor', icon: <I.Eye size={13} /> },
+    { role: 'CSR',        icon: <I.User size={13} /> },
+    { role: 'Bridge',     icon: <I.GitBranch size={13} /> },
+    { role: 'Developer',  icon: <I.Code size={13} /> },
+    { role: 'QA',         icon: <I.CheckCircle size={13} /> },
+  ];
 
   const byRole = useMemo(() => {
-    const counts = { CSR: 0, Bridge: 0, Developer: 0, QA: 0, Admin: 0 };
-    for (const u of users) { if (counts[u.role] !== undefined) counts[u.role]++; }
+    const counts = {};
+    for (const u of users) counts[u.role] = (counts[u.role] ?? 0) + 1;
     return counts;
   }, [users]);
+
+  const filtered = filterRole ? users.filter(u => u.role === filterRole) : users;
+
+  async function toggleActive(u) {
+    try {
+      await api.patch(`/users/${u.id}`, { is_active: !u.is_active });
+      reload();
+    } catch {}
+  }
 
   return (
     <div>
       <PageHeader
         title="Users & roles"
-        subtitle="Manage staff access, role assignments, and team membership"
+        subtitle={`${users.filter(u => u.is_active).length} active · ${users.filter(u => !u.is_active).length} inactive`}
         actions={<>
-          <button className="btn"><I.Download size={14} /> Export</button>
-          <button className="btn primary"><I.Plus size={14} /> Invite user</button>
+          <button className="btn primary" onClick={() => setModal('new')}><I.Plus size={14} /> Invite user</button>
         </>}
       />
       <div className="page-content">
-        <div className="grid-5" style={{ marginBottom: 20 }}>
-          {[
-            { role: "CSR",       icon: <I.User size={13} /> },
-            { role: "Bridge",    icon: <I.GitBranch size={13} /> },
-            { role: "Developer", icon: <I.Code size={13} /> },
-            { role: "QA",        icon: <I.CheckCircle size={13} /> },
-            { role: "Admin",     icon: <I.Settings size={13} /> },
-          ].map((r) => (
-            <div key={r.role} className="stat-card">
-              <div className="stat-label">{r.icon}<span>{r.role}s</span></div>
+        {/* Role stat cards */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 10, marginBottom: 20 }}>
+          {ROLE_STATS.map((r) => (
+            <div
+              key={r.role}
+              className="stat-card"
+              style={{
+                cursor: 'pointer',
+                outline: filterRole === r.role ? '2px solid var(--accent)' : 'none',
+              }}
+              onClick={() => setFilterRole(f => f === r.role ? '' : r.role)}
+            >
+              <div className="stat-label" style={{ color: ROLE_COLORS[r.role] }}>
+                {r.icon}<span>{r.role}</span>
+              </div>
               <div className="stat-value">{loading ? '…' : byRole[r.role] ?? 0}</div>
             </div>
           ))}
         </div>
 
-        <Card>
+        <Card action={
+          filterRole ? (
+            <button className="btn ghost sm" onClick={() => setFilterRole('')}>
+              <I.X size={11} /> Clear filter
+            </button>
+          ) : null
+        }>
           {loading ? (
             <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div>
+          ) : filtered.length === 0 ? (
+            <div className="empty">No users found</div>
           ) : (
             <table className="table">
               <thead>
                 <tr><th>User</th><th>Role</th><th>Status</th><th>Active tickets</th><th></th></tr>
               </thead>
               <tbody>
-                {users.map((u) => (
-                  <tr key={u.id}>
+                {filtered.map((u) => (
+                  <tr key={u.id} style={{ opacity: u.is_active ? 1 : 0.5 }}>
                     <td>
                       <div className="row gap-2">
-                        <Avatar user={{ initials: u.name.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase(), color: 'var(--accent)' }} />
+                        <Avatar user={{ initials: u.name.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase(), color: ROLE_COLORS[u.role] ?? 'var(--accent)' }} />
                         <div className="col" style={{ gap: 0 }}>
                           <span style={{ fontWeight: 500 }}>{u.name}</span>
-                          <span style={{ fontSize: 11.5, color: "var(--text-muted)" }} className="mono">{u.email}</span>
+                          <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }} className="mono">{u.email}</span>
                         </div>
                       </div>
                     </td>
                     <td>
-                      <span className="badge" style={{ background: "var(--accent-soft)", color: "var(--accent)", border: 0 }}>{u.role}</span>
+                      <span className="badge" style={{
+                        background: `color-mix(in oklch, ${ROLE_COLORS[u.role] ?? 'var(--accent)'} 12%, transparent)`,
+                        color: ROLE_COLORS[u.role] ?? 'var(--accent)',
+                        border: 0,
+                      }}>{u.role}</span>
                     </td>
                     <td>
-                      <span className="row gap-1" style={{ fontSize: 12 }}>
-                        <span className="live-dot"></span>Active
-                      </span>
+                      {u.is_active ? (
+                        <span className="row gap-1" style={{ fontSize: 12 }}>
+                          <span className="live-dot"></span>Active
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Inactive</span>
+                      )}
                     </td>
                     <td className="mono">{u.active_tickets_count ?? 0}</td>
-                    <td><button className="btn ghost icon"><I.MoreH size={14} /></button></td>
+                    <td>
+                      <UserRowMenu
+                        user={u}
+                        onEdit={(usr) => setModal(usr)}
+                        onToggleActive={toggleActive}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -513,12 +1238,22 @@ export function UsersView() {
           )}
         </Card>
       </div>
+
+      {modal && (
+        <UserModal
+          user={modal === 'new' ? null : modal}
+          onClose={() => setModal(null)}
+          onSaved={reload}
+        />
+      )}
     </div>
   );
 }
 
 export function AuditLog() {
-  const items = [
+  const [filterQ, setFilterQ] = useState('');
+
+  const allItems = [
     { action: "ticket.status_changed", actor: "Bridge", role: "Bridge", details: "Status: Open → Escalated to Dev", ticket: "SUP-2026-0514-018", minAgo: 22 },
     { action: "comment.added", actor: "CSR", role: "CSR", details: "Client-facing reply sent", ticket: "SUP-2026-0514-018", minAgo: 56 },
     { action: "ticket.priority_changed", actor: "CSR", role: "CSR", details: "Priority: High → Critical", ticket: "SUP-2026-0514-018", minAgo: 76 },
@@ -527,6 +1262,15 @@ export function AuditLog() {
     { action: "sla.breach", actor: "STMS", role: "System", details: "First response SLA breached (target 60m)", ticket: "SUP-2026-0514-018", minAgo: 18 },
     { action: "csat.recorded", actor: "Client", role: "Client", details: "5 stars — 'Quick and clear, thanks'", ticket: "SUP-2026-0514-012", minAgo: 320 },
   ];
+
+  const lq = filterQ.toLowerCase();
+  const items = filterQ
+    ? allItems.filter(it =>
+        it.action.includes(lq) || it.actor.toLowerCase().includes(lq) ||
+        it.role.toLowerCase().includes(lq) || it.details.toLowerCase().includes(lq) ||
+        (it.ticket && it.ticket.toLowerCase().includes(lq))
+      )
+    : allItems;
 
   const colors = {
     "ticket.status_changed": "var(--status-open)",
@@ -545,7 +1289,8 @@ export function AuditLog() {
         subtitle="Immutable record of every action — retained 3 years · Admin access only"
         actions={
           <>
-            <input className="input" placeholder="Filter by action or actor…" style={{ width: 240 }} />
+            <input className="input" placeholder="Filter by action, actor, or ticket…" style={{ width: 260 }}
+              value={filterQ} onChange={e => setFilterQ(e.target.value)} />
             <button className="btn"><I.Download size={14} /> Export</button>
           </>
         }
@@ -557,7 +1302,9 @@ export function AuditLog() {
               <tr><th>When</th><th>Action</th><th>Actor</th><th>Details</th><th>Ticket</th></tr>
             </thead>
             <tbody>
-              {items.map((it, i) => (
+              {items.length === 0 ? (
+                <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-faint)', padding: 24 }}>No matching entries</td></tr>
+              ) : items.map((it, i) => (
                 <tr key={i}>
                   <td className="mono" style={{ fontSize: 12, color: "var(--text-muted)" }}>{formatMin(it.minAgo)} ago</td>
                   <td>

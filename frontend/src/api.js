@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 const api = axios.create({
-  baseURL: 'http://localhost:8000/api',
+  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000/api',
   headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
 })
 
@@ -25,7 +25,8 @@ api.interceptors.response.use(
 export default api
 
 export const authApi = {
-  login:  (email, password) => api.post('/auth/login', { email, password }),
-  logout: ()               => api.post('/auth/logout'),
-  me:     ()               => api.get('/auth/me'),
+  login:    (email, password) => api.post('/auth/login', { email, password }),
+  register: (payload)         => api.post('/auth/register', payload),
+  logout:   ()                => api.post('/auth/logout'),
+  me:       ()                => api.get('/auth/me'),
 }

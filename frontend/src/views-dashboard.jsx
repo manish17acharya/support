@@ -1,8 +1,8 @@
-import React, { useState, useMemo } from 'react';
-import { DATA } from './data';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import * as I from './icons';
-import { useTickets, useDashboard } from './hooks';
+import { useTickets, useDashboard, useKbArticles, useLookups, useUsers } from './hooks';
 import { useAuth } from './AuthContext';
+import api from './api';
 import {
   Avatar, StatusPill, PriorityBadge, ChannelIcon, CategoryIcon, Tag,
   SLATag, SLABar, formatMin, Card, Stat, PageHeader, Sparkline, LineChart
@@ -187,28 +187,7 @@ export function CSRDashboard({ openTicket, setView }) {
               </div>
             </Card>
 
-            <Card title="Quick KB search">
-              <div style={{ padding: 12 }}>
-                <div className="search-input" style={{ marginBottom: 10 }}>
-                  <I.Search size={14} />
-                  <input placeholder="Search articles…" />
-                </div>
-                <div className="col gap-2">
-                  {DATA.KB_ARTICLES.slice(0, 3).map((kb) => (
-                    <div key={kb.id} style={{
-                      padding: "8px 10px", borderRadius: "var(--radius-md)",
-                      cursor: "pointer", border: "1px solid transparent"
-                    }} onMouseOver={(e) => e.currentTarget.style.background = "var(--panel-hover)"}
-                       onMouseOut={(e) => e.currentTarget.style.background = "transparent"}>
-                      <div style={{ fontSize: 12.5, color: "var(--text-strong)", marginBottom: 2 }}>{kb.title}</div>
-                      <div className="row gap-2" style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                        <span>{kb.cat}</span><span>·</span><span>{kb.views} views</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </Card>
+            <QuickKbSearch />
 
             <Card title="This week" padded>
               <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
@@ -276,100 +255,212 @@ function DashboardTicketRow({ t, onClick }) {
 // ====================================================================
 //   TICKETS LIST
 // ====================================================================
-const STATUS_FILTER_MAP = {
-  new:       ['New'],
-  open:      ['Open'],
-  waiting:   ['Waiting for Client'],
-  escalated: ['Escalated to Dev', 'Under Review', 'Deferred to Sprint'],
-  'in-dev':  ['In Development', 'In QA/Testing', 'Ready for Deployment'],
-  resolved:  ['Resolved', 'Deployed', 'Closed'],
+
+// Maps status tab IDs → comma-separated DB status names for the API
+const TAB_STATUSES = {
+  new:       'New',
+  open:      'Open',
+  waiting:   'Waiting for Client',
+  escalated: 'Escalated to Dev,Under Review,Deferred to Sprint',
+  'in-dev':  'In Development,In QA/Testing,Ready for Deployment,Deployed',
+  resolved:  'Resolved,Closed',
 };
 
-export function TicketsList({ openTicket }) {
-  const [filter, setFilter]   = useState("all");
-  const [selected, setSelected] = useState(new Set());
-  const [sort, setSort]       = useState("priority");
-  const [page, setPage]       = useState(1);
+export function TicketsList({ openTicket, setView }) {
+  const { lookups }              = useLookups();
+  const { users: csrUsers }      = useUsers('CSR');
 
-  const { tickets, meta, loading, error, reload } = useTickets({ page, per_page: 25 });
+  const [tab,            setTab]            = useState("all");
+  const [filterPriority, setFilterPriority] = useState("");
+  const [filterCategory, setFilterCategory] = useState("");
+  const [filterCsr,      setFilterCsr]      = useState("");
+  const [filterFrom,     setFilterFrom]     = useState("");
+  const [filterTo,       setFilterTo]       = useState("");
+  const [sort,           setSort]           = useState("priority");
+  const [page,           setPage]           = useState(1);
+  const [selected,       setSelected]       = useState(new Set());
+  const [bulkActioning,  setBulkActioning]  = useState(false);
+
+  const params = useMemo(() => {
+    const p = { page, per_page: 25 };
+    if (tab !== 'all' && tab !== 'breached' && TAB_STATUSES[tab]) p.statuses = TAB_STATUSES[tab];
+    if (filterPriority) p.priority    = filterPriority;
+    if (filterCategory) p.category_id = filterCategory;
+    if (filterCsr)      p.csr         = filterCsr;
+    if (filterFrom)     p.created_after  = filterFrom;
+    if (filterTo)       p.created_before = filterTo;
+    return p;
+  }, [tab, filterPriority, filterCategory, filterCsr, filterFrom, filterTo, page]);
+
+  const { tickets, meta, loading, error, reload } = useTickets(params);
+
+  const statusMap = useMemo(() => {
+    const m = {};
+    for (const s of lookups?.statuses ?? []) m[s.name] = s;
+    return m;
+  }, [lookups]);
 
   const priOrder = { Critical: 0, High: 1, Medium: 2, Low: 3 };
-
   const list = useMemo(() => {
     let l = [...tickets];
-    const allowed = STATUS_FILTER_MAP[filter];
-    if (allowed) l = l.filter(t => allowed.includes(t.status));
-    if (filter === "breached") l = l.filter(t => t.slaResolution.breached);
-    if (sort === "priority") l.sort((a, b) => (priOrder[a.priority] ?? 9) - (priOrder[b.priority] ?? 9) || a.createdMinAgo - b.createdMinAgo);
-    if (sort === "newest")   l.sort((a, b) => a.createdMinAgo - b.createdMinAgo);
-    if (sort === "oldest")   l.sort((a, b) => b.createdMinAgo - a.createdMinAgo);
+    if (tab === 'breached') l = l.filter(t => t.slaResolution.breached);
+    if (sort === 'priority') l.sort((a, b) => (priOrder[a.priority] ?? 9) - (priOrder[b.priority] ?? 9) || a.createdMinAgo - b.createdMinAgo);
+    if (sort === 'newest')   l.sort((a, b) => a.createdMinAgo - b.createdMinAgo);
+    if (sort === 'oldest')   l.sort((a, b) => b.createdMinAgo - a.createdMinAgo);
     return l;
-  }, [tickets, filter, sort]);
+  }, [tickets, sort, tab]);
 
-  const counts = useMemo(() => {
-    const c = { all: tickets.length, breached: 0 };
-    Object.entries(STATUS_FILTER_MAP).forEach(([key, statuses]) => {
-      c[key] = tickets.filter(t => statuses.includes(t.status)).length;
-    });
-    c.breached = tickets.filter(t => t.slaResolution.breached).length;
-    return c;
-  }, [tickets]);
+  const activeFilters = [filterPriority, filterCategory, filterCsr, filterFrom, filterTo].filter(Boolean).length;
 
-  const filters = [
-    { id: "all",       label: "All",               count: meta?.total ?? tickets.length },
-    { id: "new",       label: "New",               count: counts.new },
-    { id: "open",      label: "Open",              count: counts.open },
-    { id: "waiting",   label: "Waiting on client", count: counts.waiting },
-    { id: "escalated", label: "Escalated",         count: counts.escalated },
-    { id: "in-dev",    label: "In development",    count: counts['in-dev'] },
-    { id: "resolved",  label: "Resolved",          count: counts.resolved },
-    { id: "breached",  label: "SLA breached",      count: counts.breached, danger: true },
-  ];
+  function changeTab(t) { setTab(t); setSelected(new Set()); setPage(1); }
+  function clearFilters() {
+    setFilterPriority(''); setFilterCategory(''); setFilterCsr('');
+    setFilterFrom(''); setFilterTo(''); setPage(1);
+  }
 
-  const toggleSel = (id) => {
-    const next = new Set(selected);
-    next.has(id) ? next.delete(id) : next.add(id);
-    setSelected(next);
-  };
+  const toggleSel = useCallback((id) => {
+    setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  }, []);
   const toggleAll = () => {
-    if (selected.size === list.length) setSelected(new Set());
-    else setSelected(new Set(list.map(t => t.id)));
+    setSelected(selected.size === list.length ? new Set() : new Set(list.map(t => t.id)));
   };
+
+  async function bulkAssignCsr(csrId) {
+    if (!csrId) return;
+    setBulkActioning(true);
+    try {
+      await Promise.all([...selected].map(id =>
+        api.patch(`/tickets/${id}/assign`, { role: 'csr', user_id: +csrId })
+      ));
+      reload(); setSelected(new Set());
+    } finally { setBulkActioning(false); }
+  }
+
+  async function bulkSetStatus(statusName) {
+    const status = statusMap[statusName];
+    if (!status) return;
+    setBulkActioning(true);
+    try {
+      await Promise.all([...selected].map(id =>
+        api.patch(`/tickets/${id}/status`, { status_id: status.id })
+      ));
+      reload(); setSelected(new Set());
+    } finally { setBulkActioning(false); }
+  }
 
   const totalPages = meta ? Math.ceil(meta.total / meta.per_page) : 1;
+  const breachedCount = tickets.filter(t => t.slaResolution.breached).length;
+
+  const tabs = [
+    { id: "all",       label: "All",            count: tab === 'all'       ? meta?.total : undefined },
+    { id: "new",       label: "New",            count: tab === 'new'       ? meta?.total : undefined },
+    { id: "open",      label: "Open",           count: tab === 'open'      ? meta?.total : undefined },
+    { id: "waiting",   label: "Waiting",        count: tab === 'waiting'   ? meta?.total : undefined },
+    { id: "escalated", label: "Escalated",      count: tab === 'escalated' ? meta?.total : undefined },
+    { id: "in-dev",    label: "In dev",         count: tab === 'in-dev'    ? meta?.total : undefined },
+    { id: "resolved",  label: "Resolved",       count: tab === 'resolved'  ? meta?.total : undefined },
+    { id: "breached",  label: "SLA breached",   count: breachedCount || undefined, danger: true },
+  ];
 
   return (
     <div>
       <PageHeader
         title="Tickets"
-        subtitle={`${meta?.total ?? tickets.length} tickets · ${counts.breached} SLA breached`}
+        subtitle={`${meta?.total ?? tickets.length} ticket${(meta?.total ?? tickets.length) !== 1 ? 's' : ''} · ${breachedCount} SLA breached`}
         actions={
           <>
-            <button className="btn" onClick={reload}><I.Refresh size={14} /> Refresh</button>
-            <button className="btn primary"><I.Plus size={14} /> New ticket</button>
+            <button className="btn" onClick={reload} disabled={loading}><I.Refresh size={14} /> Refresh</button>
+            <button className="btn primary" onClick={() => setView?.('new-ticket')}><I.Plus size={14} /> New ticket</button>
           </>
         }
-        tabs={filters}
-        activeTab={filter}
-        onTab={(f) => { setFilter(f); setSelected(new Set()); }}
+        tabs={tabs}
+        activeTab={tab}
+        onTab={changeTab}
       />
 
       <div className="page-content" style={{ paddingTop: 16 }}>
-        <div className="row gap-2" style={{ marginBottom: 12, justifyContent: "space-between" }}>
-          <div className="row gap-2">
-            {selected.size > 0 ? (
-              <div className="row gap-2" style={{ padding: "4px 10px", background: "var(--accent-soft)", borderRadius: "var(--radius-md)", color: "var(--accent)", fontSize: 12 }}>
-                <span>{selected.size} selected</span>
-                <button className="btn sm ghost" style={{ color: "var(--accent)" }}><I.CheckCircle size={12} /> Close</button>
-              </div>
-            ) : null}
-          </div>
-          <select className="select" style={{ width: 160, paddingRight: 28 }} value={sort} onChange={(e) => setSort(e.target.value)}>
+
+        {/* Filter bar */}
+        <div className="row gap-2" style={{ marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <select className="select" style={{ width: 'auto', fontSize: 12.5 }}
+            value={filterPriority} onChange={e => { setFilterPriority(e.target.value); setPage(1); }}>
+            <option value="">Priority: All</option>
+            {(lookups?.priorities ?? []).map(p => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+          <select className="select" style={{ width: 'auto', fontSize: 12.5 }}
+            value={filterCategory} onChange={e => { setFilterCategory(e.target.value); setPage(1); }}>
+            <option value="">Category: All</option>
+            {(lookups?.categories ?? []).map(c => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+          <select className="select" style={{ width: 'auto', fontSize: 12.5 }}
+            value={filterCsr} onChange={e => { setFilterCsr(e.target.value); setPage(1); }}>
+            <option value="">Assignee: Any</option>
+            {csrUsers.filter(u => u.is_active !== false).map(u => (
+              <option key={u.id} value={u.id}>{u.name}</option>
+            ))}
+          </select>
+          <input type="date" className="input" title="Created from"
+            style={{ width: 'auto', fontSize: 12.5, padding: '4px 10px' }}
+            value={filterFrom} onChange={e => { setFilterFrom(e.target.value); setPage(1); }} />
+          <input type="date" className="input" title="Created to"
+            style={{ width: 'auto', fontSize: 12.5, padding: '4px 10px' }}
+            value={filterTo} onChange={e => { setFilterTo(e.target.value); setPage(1); }} />
+          {activeFilters > 0 && (
+            <button className="btn ghost sm" onClick={clearFilters}>
+              <I.X size={11} /> Clear {activeFilters} filter{activeFilters !== 1 ? 's' : ''}
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <select className="select" style={{ width: 160 }} value={sort} onChange={e => setSort(e.target.value)}>
             <option value="priority">Sort: Priority</option>
-            <option value="newest">Sort: Newest</option>
-            <option value="oldest">Sort: Oldest</option>
+            <option value="newest">Sort: Newest first</option>
+            <option value="oldest">Sort: Oldest first</option>
           </select>
         </div>
+
+        {/* Bulk action bar */}
+        {selected.size > 0 && (
+          <div className="row gap-2" style={{
+            padding: "8px 12px", marginBottom: 10,
+            background: "var(--accent-soft)", borderRadius: "var(--radius-md)",
+            border: "1px solid color-mix(in oklch, var(--accent) 25%, transparent)",
+          }}>
+            <span style={{ fontSize: 12.5, fontWeight: 500, color: "var(--accent)" }}>
+              {selected.size} ticket{selected.size !== 1 ? 's' : ''} selected
+            </span>
+            <span style={{ color: "var(--accent)", opacity: 0.4 }}>·</span>
+            <select className="select" style={{ width: 'auto', fontSize: 12.5, padding: '3px 28px 3px 8px' }}
+              disabled={bulkActioning}
+              defaultValue=""
+              onChange={e => { bulkAssignCsr(e.target.value); e.target.value = ''; }}>
+              <option value="" disabled>Assign CSR…</option>
+              {csrUsers.filter(u => u.is_active !== false).map(u => (
+                <option key={u.id} value={u.id}>{u.name}</option>
+              ))}
+            </select>
+            <select className="select" style={{ width: 'auto', fontSize: 12.5, padding: '3px 28px 3px 8px' }}
+              disabled={bulkActioning}
+              defaultValue=""
+              onChange={e => { bulkSetStatus(e.target.value); e.target.value = ''; }}>
+              <option value="" disabled>Change status…</option>
+              <option value="Open">Open</option>
+              <option value="Waiting for Client">Waiting for client</option>
+              <option value="Resolved">Resolved</option>
+              <option value="Closed">Closed</option>
+            </select>
+            {bulkActioning && (
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Applying to {selected.size} tickets…</span>
+            )}
+            <button className="btn ghost sm" style={{ marginLeft: 'auto' }}
+              onClick={() => setSelected(new Set())} disabled={bulkActioning}>
+              <I.X size={12} /> Deselect all
+            </button>
+          </div>
+        )}
 
         {error && (
           <div style={{ padding: 16, color: "oklch(0.55 0.2 20)", background: "oklch(0.97 0.02 20)", borderRadius: 8, marginBottom: 12 }}>
@@ -390,7 +481,7 @@ export function TicketsList({ openTicket }) {
               }}>
                 <input type="checkbox"
                   checked={selected.size > 0 && selected.size === list.length}
-                  ref={(el) => { if (el) el.indeterminate = selected.size > 0 && selected.size < list.length; }}
+                  ref={el => { if (el) el.indeterminate = selected.size > 0 && selected.size < list.length; }}
                   onChange={toggleAll}
                 />
                 <span>Ticket</span><span>Subject</span><span>Priority</span>
@@ -482,6 +573,59 @@ function TicketListRow({ t, selected, onToggle, onClick }) {
         <SLABar sla={t.slaResolution} height={3} />
       </div>
       <button className="btn ghost icon" onClick={(e) => e.stopPropagation()}><I.MoreH size={14} /></button>
+    </div>
+  );
+}
+
+function QuickKbSearch() {
+  const [q, setQ] = useState('');
+  const [debouncedQ, setDebouncedQ] = useState('');
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(q), 350);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  const { articles, loading } = useKbArticles(debouncedQ);
+  const shown = articles.filter(a => a.status === 'Published').slice(0, 3);
+
+  return (
+    <div className="card">
+      <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--divider)', fontWeight: 600, fontSize: 13.5, color: 'var(--text-strong)' }}>
+        Quick KB search
+      </div>
+      <div style={{ padding: 12 }}>
+        <div className="search-input" style={{ marginBottom: 10 }}>
+          <I.Search size={14} />
+          <input
+            placeholder="Search articles…"
+            value={q}
+            onChange={e => setQ(e.target.value)}
+          />
+        </div>
+        <div className="col gap-1">
+          {loading ? (
+            <div style={{ padding: '8px 10px', fontSize: 12, color: 'var(--text-muted)' }}>Loading…</div>
+          ) : shown.length === 0 ? (
+            <div style={{ padding: '8px 10px', fontSize: 12, color: 'var(--text-faint)' }}>{debouncedQ ? 'No articles found' : 'No published articles yet'}</div>
+          ) : shown.map(kb => (
+            <div key={kb.id} style={{
+              padding: '8px 10px', borderRadius: 'var(--radius-md)',
+              cursor: 'pointer', border: '1px solid transparent',
+            }}
+              onMouseOver={e => e.currentTarget.style.background = 'var(--panel-hover)'}
+              onMouseOut={e => e.currentTarget.style.background = 'transparent'}
+            >
+              <div style={{ fontSize: 12.5, color: 'var(--text-strong)', marginBottom: 2 }}>{kb.title}</div>
+              <div className="row gap-2" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                {kb.category && <span>{kb.category}</span>}
+                {kb.category && <span>·</span>}
+                <span>{(kb.views ?? 0).toLocaleString()} views</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

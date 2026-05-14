@@ -1,12 +1,38 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { DATA } from './data';
 import * as I from './icons';
 import {
   Avatar, StatusPill, PriorityBadge, ChannelIcon, CategoryIcon,
   Tag, SLATag, SLABar, formatMin, Card
 } from './components';
-import { useTicket, useLookups, useUsers } from './hooks';
+import { useTicket, useLookups, useUsers, useKbArticles } from './hooks';
 import api from './api';
+
+// ====================================================================
+//   UTILITY
+// ====================================================================
+function CopyButton({ text }) {
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+  return (
+    <button className="btn ghost sm" style={{ padding: "2px 6px" }} title="Copy ID" onClick={copy}>
+      {copied ? <I.Check size={12} /> : <I.Code size={12} />}
+    </button>
+  );
+}
+
+// Maps UI status keys back to DB status names for API calls
+// NOTE: Must exactly match the names stored in the ticket_statuses table
+const STATUS_UI_TO_DB = {
+  New: 'New', Open: 'Open', WaitingClient: 'Waiting for Client',
+  Resolved: 'Resolved', Closed: 'Closed', EscalatedDev: 'Escalated to Dev',
+  UnderReview: 'Under Review', DeferredSprint: 'Deferred to Sprint',
+  InDevelopment: 'In Development', InQA: 'In QA/Testing',
+  ReadyDeploy: 'Ready for Deployment', Deployed: 'Deployed', Reopened: 'Reopened',
+};
 
 // ====================================================================
 //   TICKET DETAIL — centerpiece
@@ -15,9 +41,10 @@ export function TicketDetail({ ticketId, back }) {
   const { ticket: t, loading, error, reload } = useTicket(ticketId);
   const { lookups } = useLookups();
   const [tab, setTab] = useState("conversation");
-  const [replyMode, setReplyMode] = useState("client");
-  const [replyText, setReplyText] = useState("");
-  const [sending, setSending] = useState(false);
+  const [replyMode, setReplyMode]     = useState("client");
+  const [replyText, setReplyText]     = useState("");
+  const [replyStatus, setReplyStatus] = useState("keep");
+  const [sending, setSending]         = useState(false);
   const [statusOpen, setStatusOpen] = useState(false);
   const [showResolveModal, setShowResolveModal] = useState(false);
   const [assigningRole, setAssigningRole] = useState(null);
@@ -61,7 +88,7 @@ export function TicketDetail({ ticketId, back }) {
           </button>
           <span style={{ color: "var(--text-faint)" }}>/</span>
           <span className="mono" style={{ fontSize: 12, color: "var(--text-muted)" }}>{t.ticket_id}</span>
-          <button className="btn ghost sm" style={{ padding: "2px 6px" }} title="Copy ID"><I.Code size={12} /></button>
+          <CopyButton text={t.ticket_id} />
           <div className="row gap-2" style={{ marginLeft: "auto" }}>
             <button className="btn sm"><I.Bookmark size={12} /> Watch <span style={{ color: "var(--text-muted)" }}>· {t.watchers}</span></button>
             <button className="btn sm"><I.ExternalLink size={12} /> Share</button>
@@ -140,6 +167,7 @@ export function TicketDetail({ ticketId, back }) {
           {tab === "conversation" ? <ConversationTab t={t}
             replyMode={replyMode} setReplyMode={setReplyMode}
             replyText={replyText} setReplyText={setReplyText}
+            replyStatus={replyStatus} setReplyStatus={setReplyStatus}
             onSend={async () => {
               if (!replyText.trim()) return;
               setSending(true);
@@ -149,7 +177,13 @@ export function TicketDetail({ ticketId, back }) {
                   comment_type: replyMode === 'internal' ? 'Internal_Note' : 'Client_Facing',
                   channel: replyMode === 'internal' ? 'Internal' : 'Portal',
                 });
+                if (replyStatus !== 'keep') {
+                  const dbName = STATUS_UI_TO_DB[replyStatus];
+                  const status = dbName && statusMap[dbName];
+                  if (status) await api.patch(`/tickets/${t.id}/status`, { status_id: status.id });
+                }
                 setReplyText('');
+                setReplyStatus('keep');
                 reload();
               } finally {
                 setSending(false);
@@ -234,7 +268,7 @@ function SLABanner({ t }) {
 }
 
 // === Conversation tab =================================================
-function ConversationTab({ t, replyMode, setReplyMode, replyText, setReplyText, onSend, sending }) {
+function ConversationTab({ t, replyMode, setReplyMode, replyText, setReplyText, replyStatus, setReplyStatus, onSend, sending }) {
   const comments = t.comments ?? [];
 
   return (
@@ -262,6 +296,7 @@ function ConversationTab({ t, replyMode, setReplyMode, replyText, setReplyText, 
         <ReplyComposer
           replyMode={replyMode} setReplyMode={setReplyMode}
           replyText={replyText} setReplyText={setReplyText}
+          replyStatus={replyStatus} setReplyStatus={setReplyStatus}
           contact={t.contact} contactEmail={t.contactEmail}
           onSend={onSend} sending={sending}
         />
@@ -349,7 +384,7 @@ function CommentBlock({ c }) {
   );
 }
 
-function ReplyComposer({ replyMode, setReplyMode, replyText, setReplyText, contact, contactEmail, onSend, sending }) {
+function ReplyComposer({ replyMode, setReplyMode, replyText, setReplyText, replyStatus, setReplyStatus, contact, contactEmail, onSend, sending }) {
   const isInternal = replyMode === "internal";
   return (
     <div className="card" style={{
@@ -428,10 +463,12 @@ function ReplyComposer({ replyMode, setReplyMode, replyText, setReplyText, conta
       <div className="row gap-2" style={{ padding: "10px 12px", borderTop: "1px solid var(--divider)" }}>
         {!isInternal ? (
           <>
-            <select className="select" style={{ width: "auto", padding: "4px 10px", fontSize: 12.5 }}>
-              <option>Status: keep as Open</option>
-              <option>Set status: Waiting for client</option>
-              <option>Set status: Resolved</option>
+            <select className="select" style={{ width: "auto", padding: "4px 10px", fontSize: 12.5 }}
+              value={replyStatus} onChange={e => setReplyStatus?.(e.target.value)}>
+              <option value="keep">Status: keep as-is</option>
+              <option value="WaitingClient">Set: Waiting for client</option>
+              <option value="Resolved">Set: Resolved</option>
+              <option value="Closed">Set: Closed</option>
             </select>
             <label className="row gap-1" style={{ fontSize: 12, color: "var(--text-muted)" }}>
               <input type="checkbox" defaultChecked /> CC supervisor
@@ -478,8 +515,8 @@ function StatusDropdown({ current, ticketId, statusMap, reload, onClose }) {
 
   async function pick(statusKey) {
     if (statusKey === current || changing) return;
-    const dbName = DATA.STATUSES[statusKey]?.name;
-    const status = statusMap[dbName];
+    const dbName = STATUS_UI_TO_DB[statusKey];
+    const status = dbName && statusMap[dbName];
     if (!status) { onClose(); return; }
     setChanging(statusKey);
     try {
@@ -556,32 +593,18 @@ function ActivityTab({ t }) {
 }
 
 function AttachmentsTab({ t }) {
-  const items = [
-    { name: "checkout-failure.har",  size: "1.4 MB", who: "Elena Rivera", min: 78 },
-    { name: "screenshot-1.png",      size: "284 KB", who: "Elena Rivera", min: 78 },
-    { name: "screenshot-2.png",      size: "302 KB", who: "Elena Rivera", min: 78 },
-    { name: "gateway-logs.txt",      size: "84 KB",  who: "Aisha Patel",   min: 56 },
-    { name: "paypal-cert-rotation-runbook.pdf", size: "920 KB", who: "James Okonkwo", min: 22 },
-  ];
   return (
-    <div className="card">
-      <div style={{ padding: 12 }}>
-        {items.map((a) => (
-          <div key={a.name} className="row gap-3" style={{
-            padding: "10px 8px", borderBottom: "1px solid var(--divider)"
-          }}>
-            <div style={{
-              width: 32, height: 32, borderRadius: 6,
-              background: "var(--bg-sunken)", display: "grid", placeItems: "center",
-              color: "var(--text-muted)"
-            }}><I.FileText size={14} /></div>
-            <div className="col" style={{ gap: 2, flex: 1 }}>
-              <span style={{ fontSize: 13, color: "var(--text-strong)" }}>{a.name}</span>
-              <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{a.size} · uploaded by {a.who} · {formatMin(a.min)} ago</span>
-            </div>
-            <button className="btn sm"><I.Download size={12} /></button>
-          </div>
-        ))}
+    <div className="card" style={{ padding: 16 }}>
+      <div className="row gap-2" style={{ marginBottom: 12 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-strong)" }}>Attachments</span>
+        <button className="btn sm ghost" style={{ marginLeft: "auto" }}>
+          <I.Paperclip size={12} /> Upload file
+        </button>
+      </div>
+      <div style={{ padding: "32px 0", textAlign: "center", color: "var(--text-faint)" }}>
+        <I.Paperclip size={28} style={{ marginBottom: 8, opacity: 0.35 }} />
+        <div style={{ fontSize: 13 }}>No attachments yet</div>
+        <div style={{ fontSize: 12, marginTop: 4 }}>Drag & drop files here, or use the upload button above</div>
       </div>
     </div>
   );
@@ -590,84 +613,81 @@ function AttachmentsTab({ t }) {
 function EmailThreadTab({ t }) {
   return (
     <div className="card" style={{ padding: 16 }}>
-      <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginBottom: 12 }}>
-        Threaded by <span className="mono" style={{ color: "var(--text)" }}>[Ticket #{t.ticket_id}]</span> in subject line. Replies are auto-ingested.
+      <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginBottom: 16 }}>
+        Incoming emails with subject <span className="mono" style={{ color: "var(--text)" }}>[{t.ticket_id}]</span> are auto-threaded here.
       </div>
-      {[
-        { subj: `[Ticket #${t.ticket_id}] Your Support Request Has Been Received`, dir: "Outbound", from: "support@helpdesk.co", to: t.contactEmail, min: 78 },
-        { subj: `Re: [Ticket #${t.ticket_id}] Your Support Request Has Been Received`, dir: "Inbound", from: t.contactEmail, to: "support@helpdesk.co", min: 78 },
-        { subj: `[Ticket #${t.ticket_id}] Workaround available while we investigate`, dir: "Outbound", from: "aisha.patel@helpdesk.co", to: t.contactEmail, min: 56 },
-      ].map((e, i) => (
-        <div key={i} style={{
-          padding: 12, marginBottom: 8,
-          border: "1px solid var(--divider)", borderRadius: "var(--radius-md)",
-          background: e.dir === "Inbound" ? "var(--bg-sunken)" : "var(--panel)"
-        }}>
-          <div className="row gap-2" style={{ marginBottom: 4 }}>
-            <span className="badge" style={{ fontSize: 10.5 }}>{e.dir}</span>
-            <span style={{ fontSize: 13, color: "var(--text-strong)" }} className="truncate">{e.subj}</span>
-            <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)", marginLeft: "auto" }}>{formatMin(e.min)} ago</span>
-          </div>
-          <div style={{ fontSize: 11.5, color: "var(--text-muted)" }} className="mono">
-            {e.from} → {e.to}
-          </div>
+      <div style={{ padding: "32px 0", textAlign: "center", color: "var(--text-faint)" }}>
+        <I.Mail size={28} style={{ marginBottom: 8, opacity: 0.35 }} />
+        <div style={{ fontSize: 13 }}>No email thread yet</div>
+        <div style={{ fontSize: 12, marginTop: 4 }}>
+          Emails from <span className="mono">{t.contactEmail || "the client"}</span> will appear here once received
         </div>
-      ))}
+      </div>
     </div>
   );
 }
 
 function LinkedWorkTab({ t }) {
+  const words = (t.title || '').split(' ').slice(0, 3).join(' ');
+  const { articles, loading: kbLoading } = useKbArticles(words);
+  const published = (articles || []).filter(a => a.status === 'Published').slice(0, 3);
+
   return (
     <div className="col gap-3">
+      {/* Dev task */}
       <div className="card" style={{ padding: 14 }}>
         <div className="row gap-2" style={{ marginBottom: 10 }}>
           <I.GitBranch size={14} />
           <span style={{ fontWeight: 600, color: "var(--text-strong)" }}>Linked development task</span>
+          <button className="btn sm ghost" style={{ marginLeft: "auto" }}><I.Plus size={11} /> Link</button>
         </div>
-        <div className="row gap-3" style={{
-          padding: 10, border: "1px solid var(--border)", borderRadius: "var(--radius-md)", background: "var(--bg-sunken)"
-        }}>
-          <span className="mono" style={{ fontSize: 12, color: "var(--accent)" }}>DEV-2841</span>
-          <span style={{ fontSize: 13, flex: 1 }} className="truncate">Fix PayPal IPN timeout after TLS rotation</span>
-          <span className="status-pill" style={{ "--status-color": "var(--status-dev)" }}><span className="dot"></span>In Progress</span>
-          <span className="badge"><Avatar user={DATA.USERS[5]} size="sm" /> Leo Kowalski</span>
-          <button className="btn sm ghost"><I.ExternalLink size={12} /></button>
-        </div>
-        <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 10 }}>
-          Status changes in DEV-2841 will auto-propagate here: <span className="mono">In Dev → In QA → Ready → Deployed</span>.
+        <div style={{ padding: "14px 0", textAlign: "center", color: "var(--text-faint)", fontSize: 12.5 }}>
+          No dev task linked yet
         </div>
       </div>
 
+      {/* Sprint */}
       <div className="card" style={{ padding: 14 }}>
         <div className="row gap-2" style={{ marginBottom: 10 }}>
           <I.Layers size={14} />
           <span style={{ fontWeight: 600, color: "var(--text-strong)" }}>Sprint</span>
         </div>
-        <div className="row gap-3">
-          <span className="badge" style={{ fontFamily: "var(--font-mono)" }}>Sprint 31</span>
-          <span style={{ fontSize: 13, color: "var(--text)" }}>May 05 → May 18 · Active</span>
-          <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--text-muted)" }}>3 days remaining</span>
-        </div>
+        {t.sprintName ? (
+          <div className="row gap-3">
+            <span className="badge" style={{ fontFamily: "var(--font-mono)" }}>{t.sprintName}</span>
+            <span style={{ fontSize: 13, color: "var(--text)" }}>Active sprint</span>
+          </div>
+        ) : (
+          <div style={{ fontSize: 12.5, color: "var(--text-faint)", padding: "4px 0" }}>
+            Not assigned to a sprint
+          </div>
+        )}
       </div>
 
+      {/* KB articles */}
       <div className="card" style={{ padding: 14 }}>
         <div className="row gap-2" style={{ marginBottom: 10 }}>
           <I.BookOpen size={14} />
           <span style={{ fontWeight: 600, color: "var(--text-strong)" }}>Related KB articles</span>
         </div>
-        {DATA.KB_ARTICLES.slice(1, 3).map((kb) => (
-          <div key={kb.id} className="row gap-3" style={{
-            padding: 8, borderBottom: "1px solid var(--divider)"
-          }}>
-            <I.FileText size={14} style={{ color: "var(--text-muted)" }} />
-            <div className="col" style={{ gap: 1, flex: 1 }}>
-              <span style={{ fontSize: 13, color: "var(--text-strong)" }}>{kb.title}</span>
-              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{kb.cat} · {kb.views} views · linked to {kb.linkedTickets} tickets</span>
+        {kbLoading ? (
+          <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "8px 0" }}>Searching…</div>
+        ) : published.length > 0 ? (
+          published.map((kb) => (
+            <div key={kb.id} className="row gap-3" style={{ padding: 8, borderBottom: "1px solid var(--divider)" }}>
+              <I.FileText size={14} style={{ color: "var(--text-muted)" }} />
+              <div className="col" style={{ gap: 1, flex: 1 }}>
+                <span style={{ fontSize: 13, color: "var(--text-strong)" }}>{kb.title}</span>
+                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{kb.category} · {kb.views} views</span>
+              </div>
+              <button className="btn sm">Insert</button>
             </div>
-            <button className="btn sm">Insert</button>
+          ))
+        ) : (
+          <div style={{ fontSize: 12.5, color: "var(--text-faint)", padding: "4px 0" }}>
+            No related articles found
           </div>
-        ))}
+        )}
       </div>
     </div>
   );
@@ -786,9 +806,12 @@ function TicketSidebar({ t, csr, bridge, dev, qa, company, onResolve, ticketId, 
         <div className="divider-h" style={{ margin: "16px 0" }}></div>
 
         <div className="section-label" style={{ marginBottom: 10 }}>Watchers ({t.watchers})</div>
-        <div className="avatar-stack">
-          {DATA.USERS.slice(0, Math.min(t.watchers, 5)).map((u) => <Avatar key={u.id} user={u} size="sm" />)}
-        </div>
+        {t.watchers > 0 ? (
+          <div style={{ fontSize: 12.5, color: "var(--text-muted)" }}>{t.watchers} watcher{t.watchers !== 1 ? 's' : ''}</div>
+        ) : (
+          <div style={{ fontSize: 12, color: "var(--text-faint)" }}>No watchers yet</div>
+        )}
+        <button className="btn sm ghost" style={{ marginTop: 4 }}><I.Bell size={11} /> Watch ticket</button>
       </div>
     </div>
   );

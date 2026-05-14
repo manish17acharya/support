@@ -170,6 +170,34 @@ export function Sidebar({ view, setView, role, user, onLogout }) {
       { id: "audit",          label: "Audit Log",      icon: <I.FileText /> },
       { id: "settings",       label: "Settings",       icon: <I.Settings /> },
     ],
+    SuperAdmin: [
+      { id: "users",          label: "Users & Roles",  icon: <I.Users /> },
+      { id: "analytics",      label: "Analytics",      icon: <I.BarChart /> },
+      { id: "tickets",        label: "All Tickets",    icon: <I.Inbox /> },
+      { id: "bridge",         label: "Escalations",    icon: <I.GitBranch /> },
+      { id: "sprints",        label: "Sprint Board",   icon: <I.Layers /> },
+      { id: "kb",             label: "Knowledge Base", icon: <I.BookOpen /> },
+      { id: "companies",      label: "Companies",      icon: <I.Building /> },
+      { id: "audit",          label: "Audit Log",      icon: <I.FileText /> },
+      { id: "settings",       label: "Settings",       icon: <I.Settings /> },
+    ],
+    Manager: [
+      { id: "analytics",      label: "Analytics",      icon: <I.BarChart /> },
+      { id: "tickets",        label: "All Tickets",    icon: <I.Inbox /> },
+      { id: "bridge",         label: "Escalations",    icon: <I.GitBranch /> },
+      { id: "sprints",        label: "Sprint Board",   icon: <I.Layers /> },
+      { id: "kb",             label: "Knowledge Base", icon: <I.BookOpen /> },
+      { id: "companies",      label: "Companies",      icon: <I.Building /> },
+      { id: "users",          label: "Users & Roles",  icon: <I.Users /> },
+    ],
+    Supervisor: [
+      { id: "dashboard",      label: "My Dashboard",   icon: <I.Dashboard /> },
+      { id: "tickets",        label: "All Tickets",    icon: <I.Inbox /> },
+      { id: "bridge",         label: "Escalations",    icon: <I.GitBranch /> },
+      { id: "sprints",        label: "Sprint Board",   icon: <I.Layers /> },
+      { id: "kb",             label: "Knowledge Base", icon: <I.BookOpen /> },
+      { id: "users",          label: "Team",           icon: <I.Users /> },
+    ],
   };
 
   const items = navByRole[role] || navByRole.CSR;

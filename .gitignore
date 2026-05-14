@@ -1,0 +1,28 @@
+# Docker secrets (never commit real env files)
+.env.docker
+.env.local
+.env.*.local
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Claude memory
+.claude/
+frontend/.claude/
+
+# Root-level stray files (old prototype files before project restructure)
+app.jsx
+components.jsx
+data.jsx
+icons.jsx
+styles.css
+tweaks-panel.jsx
+views-admin.jsx
+views-dashboard.jsx
+views-other.jsx
+views-ticket.jsx
+"Support Ticket Management System.html"
+stms_schema_v2.sql

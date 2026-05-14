@@ -310,6 +310,22 @@ button { cursor: pointer; }
   background: var(--panel); color: var(--text-muted);
 }
 
+/* Dropdown menus */
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.1s;
+  white-space: nowrap;
+}
+.dropdown-item:hover { background: var(--panel-hover); }
+.dropdown-item:first-child { border-radius: var(--radius-md) var(--radius-md) 0 0; }
+.dropdown-item:last-child  { border-radius: 0 0 var(--radius-md) var(--radius-md); }
+
 /* Cards */
 .card {
   background: var(--panel);

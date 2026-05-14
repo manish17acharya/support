@@ -1,5 +1,4 @@
-import React, { useState, useEffect } from 'react';
-import { DATA } from './data';
+import React, { useState, useEffect, useRef } from 'react';
 import * as I from './icons';
 import {
   Avatar, StatusPill, PriorityBadge, ChannelIcon, CategoryIcon,
@@ -25,7 +24,6 @@ export function NewTicketForm({ back }) {
   const [submitting, setSubmitting]     = useState(false);
   const [errors, setErrors]             = useState({});
 
-  // Set sensible defaults once lookups arrive
   useEffect(() => {
     if (!lookups) return;
     if (!priorityId) {
@@ -54,7 +52,6 @@ export function NewTicketForm({ back }) {
 
   async function handleSubmit() {
     setErrors({});
-
     const local = {};
     if (!title.trim())        local.title = 'Subject is required';
     if (!description.trim())  local.description = 'Description is required';
@@ -103,7 +100,6 @@ export function NewTicketForm({ back }) {
       />
 
       <div className="page-content form-cols">
-        {/* Left column: form */}
         <div className="col gap-4">
           <Card title="Client">
             <div style={{ padding: 16 }}>
@@ -218,7 +214,6 @@ export function NewTicketForm({ back }) {
           </Card>
         </div>
 
-        {/* Right column: live preview */}
         <div className="col gap-4">
           <Card title="Auto actions">
             <div style={{ padding: 16 }}>
@@ -290,10 +285,213 @@ function PreviewRow({ icon, text }) {
 }
 
 // ====================================================================
+//   MODAL SHELL
+// ====================================================================
+function Modal({ title, onClose, children, width = 480 }) {
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 9999,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }} onClick={onClose}>
+      <div style={{
+        background: 'var(--panel)', border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-lg)', width, maxWidth: '95vw',
+        boxShadow: '0 24px 48px rgba(0,0,0,0.25)', padding: 24,
+      }} onClick={e => e.stopPropagation()}>
+        <div className="row gap-2" style={{ marginBottom: 20 }}>
+          <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-strong)' }}>{title}</span>
+          <button className="btn ghost icon" style={{ marginLeft: 'auto' }} onClick={onClose}>
+            <I.X size={14} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ====================================================================
+//   SPRINT MODAL (create / edit)
+// ====================================================================
+function SprintModal({ sprint, onClose, onSaved }) {
+  const isEdit = !!sprint;
+  const [name, setName]           = useState(sprint?.name ?? '');
+  const [startDate, setStartDate] = useState(sprint?.start_date?.slice(0, 10) ?? '');
+  const [endDate, setEndDate]     = useState(sprint?.end_date?.slice(0, 10) ?? '');
+  const [notes, setNotes]         = useState(sprint?.notes ?? '');
+  const [saving, setSaving]       = useState(false);
+  const [error, setError]         = useState('');
+
+  async function handleSave() {
+    if (!name.trim()) { setError('Sprint name is required'); return; }
+    if (!startDate)   { setError('Start date is required'); return; }
+    if (!endDate)     { setError('End date is required'); return; }
+    if (endDate <= startDate) { setError('End date must be after start date'); return; }
+
+    setSaving(true);
+    setError('');
+    try {
+      if (isEdit) {
+        await api.patch(`/sprints/${sprint.id}`, { name, start_date: startDate, end_date: endDate, notes });
+      } else {
+        await api.post('/sprints', { name, start_date: startDate, end_date: endDate, notes, status: 'Planned' });
+      }
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err.response?.data?.message ?? 'Save failed');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal title={isEdit ? 'Edit sprint' : 'New sprint'} onClose={onClose}>
+      <div className="col gap-3">
+        <FormField label="Sprint name" required>
+          <input className="input" value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Sprint 7 · May 2026" autoFocus />
+        </FormField>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <FormField label="Start date" required>
+            <input className="input" type="date" value={startDate} onChange={e => setStartDate(e.target.value)} />
+          </FormField>
+          <FormField label="End date" required>
+            <input className="input" type="date" value={endDate} onChange={e => setEndDate(e.target.value)} />
+          </FormField>
+        </div>
+        <FormField label="Notes (optional)">
+          <textarea className="textarea" value={notes} onChange={e => setNotes(e.target.value)} style={{ minHeight: 72 }} placeholder="Sprint goal, scope notes…" />
+        </FormField>
+        {error && <div style={{ fontSize: 12, color: 'var(--sla-breach)' }}>{error}</div>}
+        <div className="row gap-2" style={{ justifyContent: 'flex-end', marginTop: 4 }}>
+          <button className="btn" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn primary" onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create sprint'}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ====================================================================
+//   ADD TO SPRINT MODAL
+// ====================================================================
+function AddToSprintModal({ ticket, sprints, onClose, onSaved }) {
+  const [sprintId, setSprintId] = useState('');
+  const [saving, setSaving]     = useState(false);
+  const [error, setError]       = useState('');
+
+  const activeSprints = sprints.filter(s => s.status !== 'Completed');
+
+  async function handleSave() {
+    if (!sprintId) { setError('Please select a sprint'); return; }
+    setSaving(true);
+    setError('');
+    try {
+      await api.patch(`/tickets/${ticket.id}`, { sprint_id: parseInt(sprintId) });
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err.response?.data?.message ?? 'Failed to add to sprint');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal title="Add to sprint" onClose={onClose} width={400}>
+      <div className="col gap-3">
+        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+          Adding <span className="mono" style={{ color: 'var(--text-strong)' }}>{ticket.ticket_id}</span> — {ticket.title?.slice(0, 60)}
+        </div>
+        <FormField label="Sprint" required>
+          <select className="select" value={sprintId} onChange={e => setSprintId(e.target.value)} autoFocus>
+            <option value="">Select a sprint…</option>
+            {activeSprints.map(s => (
+              <option key={s.id} value={s.id}>{s.name} ({s.status})</option>
+            ))}
+          </select>
+        </FormField>
+        {activeSprints.length === 0 && (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No active or planned sprints available.</div>
+        )}
+        {error && <div style={{ fontSize: 12, color: 'var(--sla-breach)' }}>{error}</div>}
+        <div className="row gap-2" style={{ justifyContent: 'flex-end', marginTop: 4 }}>
+          <button className="btn" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn primary" onClick={handleSave} disabled={saving || activeSprints.length === 0}>
+            {saving ? 'Adding…' : 'Add to sprint'}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ====================================================================
+//   SPRINT CARD 3-DOT MENU
+// ====================================================================
+function SprintCardMenu({ sprint, onEdit, onDelete, onComplete }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onMouseDown(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, [open]);
+
+  return (
+    <div ref={ref} style={{ position: 'relative', marginLeft: 'auto' }}>
+      <button
+        className="btn ghost icon"
+        style={{ padding: '2px 4px', opacity: 0.6 }}
+        onClick={e => { e.stopPropagation(); setOpen(o => !o); }}
+      >
+        <I.MoreH size={13} />
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', right: 0, top: '100%', marginTop: 4,
+          background: 'var(--panel)', border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-md)', boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+          minWidth: 140, zIndex: 100,
+        }}>
+          <div className="dropdown-item" onClick={() => { setOpen(false); onEdit(sprint); }}>
+            <I.Edit size={13} /> Edit
+          </div>
+          {sprint.status !== 'Completed' && (
+            <div className="dropdown-item" onClick={() => { setOpen(false); onComplete(sprint); }}>
+              <I.CheckCircle size={13} /> Mark complete
+            </div>
+          )}
+          {sprint.status !== 'Active' && (
+            <div className="dropdown-item" onClick={() => { setOpen(false); onDelete(sprint); }} style={{ color: 'var(--sla-breach)' }}>
+              <I.Trash size={13} /> Delete
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ====================================================================
 //   BRIDGE PERSON — escalations queue
 // ====================================================================
 export function BridgeView({ openTicket }) {
   const { tickets, loading, reload } = useEscalatedTickets();
+  const { sprints } = useSprints();
+  const [addToSprintTicket, setAddToSprintTicket] = useState(null);
 
   const STATUS_COLS = [
     { key: 'EscalatedDev',   dbName: 'Escalated to Dev',      title: 'Just Escalated',     color: 'var(--status-escalated)' },
@@ -314,7 +512,6 @@ export function BridgeView({ openTicket }) {
         actions={
           <>
             <button className="btn" onClick={reload} disabled={loading}><I.Refresh size={14} /> Refresh</button>
-            <button className="btn primary"><I.Plus size={14} /> Add to sprint</button>
           </>
         }
       />
@@ -354,18 +551,34 @@ export function BridgeView({ openTicket }) {
                     <div style={{ padding: 20, fontSize: 12, color: 'var(--text-faint)', textAlign: 'center' }}>Loading…</div>
                   ) : items.length === 0 ? (
                     <div style={{ padding: 20, fontSize: 12, color: 'var(--text-faint)', textAlign: 'center' }}>No tickets</div>
-                  ) : items.map(t => <KanbanCard key={t.id} t={t} onClick={() => openTicket(t.id)} />)}
+                  ) : items.map(t => (
+                    <KanbanCard
+                      key={t.id}
+                      t={t}
+                      onClick={() => openTicket(t.id)}
+                      onAddToSprint={sprints.length > 0 ? () => setAddToSprintTicket(t) : null}
+                    />
+                  ))}
                 </div>
               </div>
             );
           })}
         </div>
       </div>
+
+      {addToSprintTicket && (
+        <AddToSprintModal
+          ticket={addToSprintTicket}
+          sprints={sprints}
+          onClose={() => setAddToSprintTicket(null)}
+          onSaved={reload}
+        />
+      )}
     </div>
   );
 }
 
-function KanbanCard({ t, onClick }) {
+function KanbanCard({ t, onClick, onAddToSprint }) {
   return (
     <div className="card fade-in" style={{ padding: 12, cursor: 'pointer' }} onClick={onClick}>
       <div className="row gap-2" style={{ marginBottom: 6 }}>
@@ -381,7 +594,17 @@ function KanbanCard({ t, onClick }) {
         <div className="row gap-1" style={{ fontSize: 10.5, color: 'var(--accent)', marginBottom: 8 }}>
           <I.Layers size={10} /> <span>{t.sprintName}</span>
         </div>
-      ) : null}
+      ) : (
+        onAddToSprint ? (
+          <button
+            className="btn ghost"
+            style={{ fontSize: 10.5, padding: '2px 6px', marginBottom: 8 }}
+            onClick={e => { e.stopPropagation(); onAddToSprint(); }}
+          >
+            <I.Plus size={10} /> Add to sprint
+          </button>
+        ) : null
+      )}
       <div className="row gap-2" style={{ paddingTop: 6, borderTop: '1px solid var(--divider)', fontSize: 11 }}>
         <SLATag sla={t.slaResolution} />
         <div className="row gap-1" style={{ marginLeft: 'auto' }}>
@@ -399,8 +622,10 @@ function KanbanCard({ t, onClick }) {
 export function SprintsView({ openTicket }) {
   const { sprints, loading: sprintsLoading, reload } = useSprints();
   const [selectedSprintId, setSelectedSprintId] = useState(null);
+  const [sprintModal, setSprintModal]   = useState(null); // null | 'new' | sprint obj
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [deleting, setDeleting]           = useState(false);
 
-  // Auto-select active sprint on load
   React.useEffect(() => {
     if (!selectedSprintId && sprints.length > 0) {
       const active = sprints.find(s => s.status === 'Active');
@@ -409,8 +634,8 @@ export function SprintsView({ openTicket }) {
   }, [sprints]);
 
   const selectedSprint = sprints.find(s => s.id === selectedSprintId) ?? null;
-  const { tickets: sprintTickets, loading: ticketsLoading } = useTickets(
-    selectedSprintId ? { sprint_id: selectedSprintId, per_page: 100 } : {}
+  const { tickets: sprintTickets, loading: ticketsLoading, reload: reloadTickets } = useTickets(
+    selectedSprintId ? { sprint_id: selectedSprintId, per_page: 200 } : {}
   );
 
   const SPRINT_BOARD_COLS = [
@@ -427,8 +652,25 @@ export function SprintsView({ openTicket }) {
 
   function daysRemaining(endDate) {
     if (!endDate) return null;
-    const diff = Math.ceil((new Date(endDate) - new Date()) / 86400000);
-    return diff;
+    return Math.ceil((new Date(endDate) - new Date()) / 86400000);
+  }
+
+  async function handleComplete(sprint) {
+    try {
+      await api.patch(`/sprints/${sprint.id}`, { status: 'Completed' });
+      reload();
+    } catch {}
+  }
+
+  async function handleDelete(sprint) {
+    setDeleting(true);
+    try {
+      await api.delete(`/sprints/${sprint.id}`);
+      setConfirmDelete(null);
+      if (selectedSprintId === sprint.id) setSelectedSprintId(null);
+      reload();
+    } catch {}
+    finally { setDeleting(false); }
   }
 
   return (
@@ -439,7 +681,7 @@ export function SprintsView({ openTicket }) {
         actions={
           <>
             <button className="btn" onClick={reload} disabled={sprintsLoading}><I.Refresh size={14} /> Refresh</button>
-            <button className="btn primary"><I.Plus size={14} /> New sprint</button>
+            <button className="btn primary" onClick={() => setSprintModal('new')}><I.Plus size={14} /> New sprint</button>
           </>
         }
       />
@@ -449,7 +691,9 @@ export function SprintsView({ openTicket }) {
           {sprintsLoading ? (
             <div style={{ gridColumn: '1/-1', padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>Loading sprints…</div>
           ) : sprints.length === 0 ? (
-            <div style={{ gridColumn: '1/-1', padding: 16, textAlign: 'center', color: 'var(--text-faint)', fontSize: 13 }}>No sprints yet</div>
+            <div style={{ gridColumn: '1/-1', padding: 24, textAlign: 'center', color: 'var(--text-faint)', fontSize: 13 }}>
+              No sprints yet — <button className="btn sm" onClick={() => setSprintModal('new')}>create the first sprint</button>
+            </div>
           ) : sprints.map(s => {
             const isActive   = s.status === 'Active';
             const isSelected = s.id === selectedSprintId;
@@ -469,6 +713,12 @@ export function SprintsView({ openTicket }) {
                     color: isActive ? 'var(--accent)' : s.status === 'Completed' ? 'var(--sla-ok)' : 'var(--text-muted)',
                     background: isActive ? 'var(--accent-soft)' : 'var(--bg-sunken)',
                   }}>{s.status}</span>
+                  <SprintCardMenu
+                    sprint={s}
+                    onEdit={(sp) => setSprintModal(sp)}
+                    onComplete={handleComplete}
+                    onDelete={(sp) => setConfirmDelete(sp)}
+                  />
                 </div>
                 <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginBottom: 10 }} className="mono">
                   {formatDate(s.start_date)} → {formatDate(s.end_date)}
@@ -492,7 +742,7 @@ export function SprintsView({ openTicket }) {
           })}
         </div>
 
-        {/* Selected sprint mini-board */}
+        {/* Selected sprint board */}
         {selectedSprint && (
           <div className="card">
             <div className="row gap-3" style={{ padding: '14px 16px', borderBottom: '1px solid var(--divider)' }}>
@@ -510,6 +760,9 @@ export function SprintsView({ openTicket }) {
                   · {Math.max(0, daysRemaining(selectedSprint.end_date))} days remaining
                 </span>
               )}
+              <div style={{ marginLeft: 'auto' }}>
+                <span className="mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>{sprintTickets.length} tickets</span>
+              </div>
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, padding: 16 }}>
@@ -524,12 +777,12 @@ export function SprintsView({ openTicket }) {
                         {ticketsLoading ? '…' : items.length}
                       </span>
                     </div>
-                    <div className="col gap-2">
+                    <div className="col gap-2" style={{ maxHeight: 600, overflowY: 'auto' }}>
                       {ticketsLoading ? (
                         <div style={{ padding: 16, fontSize: 11, color: 'var(--text-faint)', textAlign: 'center' }}>Loading…</div>
                       ) : items.length === 0 ? (
                         <div style={{ padding: 16, fontSize: 11, color: 'var(--text-faint)', textAlign: 'center' }}>Empty</div>
-                      ) : items.slice(0, 5).map(t => <KanbanCard key={t.id} t={t} onClick={() => openTicket(t.id)} />)}
+                      ) : items.map(t => <KanbanCard key={t.id} t={t} onClick={() => openTicket(t.id)} />)}
                     </div>
                   </div>
                 );
@@ -538,6 +791,33 @@ export function SprintsView({ openTicket }) {
           </div>
         )}
       </div>
+
+      {/* Sprint create/edit modal */}
+      {sprintModal && (
+        <SprintModal
+          sprint={sprintModal === 'new' ? null : sprintModal}
+          onClose={() => setSprintModal(null)}
+          onSaved={() => { reload(); }}
+        />
+      )}
+
+      {/* Delete confirm modal */}
+      {confirmDelete && (
+        <Modal title="Delete sprint?" onClose={() => setConfirmDelete(null)} width={400}>
+          <div className="col gap-4">
+            <div style={{ fontSize: 13, color: 'var(--text)' }}>
+              Delete <strong>{confirmDelete.name}</strong>? Tickets in this sprint will be unassigned from it.
+            </div>
+            <div className="row gap-2" style={{ justifyContent: 'flex-end' }}>
+              <button className="btn" onClick={() => setConfirmDelete(null)} disabled={deleting}>Cancel</button>
+              <button className="btn" style={{ background: 'var(--sla-breach)', color: '#fff', border: 0 }}
+                onClick={() => handleDelete(confirmDelete)} disabled={deleting}>
+                {deleting ? 'Deleting…' : 'Delete sprint'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -547,6 +827,8 @@ export function SprintsView({ openTicket }) {
 // ====================================================================
 export function DevWorkView({ role, openTicket }) {
   const { user } = useAuth();
+  const { lookups } = useLookups();
+  const [actioning, setActioning] = useState(null);
 
   const devStatuses = 'In Development,In QA/Testing,Ready for Deployment';
   const qaStatuses  = 'In QA/Testing,Ready for Deployment';
@@ -555,15 +837,33 @@ export function DevWorkView({ role, openTicket }) {
     if (!user?.id) return {};
     if (role === 'QA')        return { qa_id: user.id, statuses: qaStatuses, per_page: 50 };
     if (role === 'Developer') return { developer_id: user.id, statuses: devStatuses, per_page: 50 };
-    // Bridge/Admin: show all in-dev work
     return { statuses: devStatuses, per_page: 50 };
   }, [role, user?.id]);
 
   const { tickets, loading, reload } = useTickets(params);
 
-  const count = (status) => tickets.filter(t => t.status === status).length;
+  const statusIdMap = React.useMemo(() => {
+    const m = {};
+    for (const s of lookups?.statuses ?? []) m[s.name] = s.id;
+    return m;
+  }, [lookups]);
 
-  const deployedCount = 0; // would need a separate query for deployed-this-sprint
+  async function handleAction(e, ticketId) {
+    e.stopPropagation();
+    if (actioning) return;
+    const target = role === 'QA' ? 'Ready for Deployment' : 'In QA/Testing';
+    const status_id = statusIdMap[target];
+    if (!status_id) return;
+    setActioning(ticketId);
+    try {
+      await api.patch(`/tickets/${ticketId}/status`, { status_id });
+      reload();
+    } finally {
+      setActioning(null);
+    }
+  }
+
+  const count = (status) => tickets.filter(t => t.status === status).length;
 
   return (
     <div>
@@ -608,10 +908,14 @@ export function DevWorkView({ role, openTicket }) {
                 </div>
                 <PriorityBadge priority={t.priority} />
                 <StatusPill status={t.status} />
-                <button className="btn sm primary" onClick={(e) => e.stopPropagation()}>
-                  {role === 'QA'
-                    ? <><I.Check size={11} /> Approve</>
-                    : <><I.ArrowRight size={11} /> Push to QA</>}
+                <button className="btn sm primary"
+                  disabled={!!actioning}
+                  onClick={(e) => handleAction(e, t.id)}>
+                  {actioning === t.id
+                    ? 'Saving…'
+                    : role === 'QA'
+                      ? <><I.Check size={11} /> Approve</>
+                      : <><I.ArrowRight size={11} /> Push to QA</>}
                 </button>
               </div>
             ))}

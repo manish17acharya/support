@@ -72,18 +72,23 @@ export function useTicket(id) {
 }
 
 export function useUsers(role) {
-  const [users, setUsers] = useState([]);
+  const [users, setUsers]   = useState([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const params = role ? { role } : {};
+  const load = useCallback(() => {
+    setLoading(true);
+    const params = {};
+    if (role) params.role = role;
+    params.include_inactive = 1;
     api.get('/users', { params })
       .then(({ data }) => setUsers(data))
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [role]);
 
-  return { users, loading };
+  useEffect(() => { load(); }, [load]);
+
+  return { users, loading, reload: load };
 }
 
 export function useLookups() {

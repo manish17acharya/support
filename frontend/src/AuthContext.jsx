@@ -24,6 +24,13 @@ export function AuthProvider({ children }) {
     return data.user
   }
 
+  const register = async (payload) => {
+    const { data } = await authApi.register(payload)
+    localStorage.setItem('stms_token', data.token)
+    setUser(data.user)
+    return data.user
+  }
+
   const logout = async () => {
     try { await authApi.logout() } catch (_) {}
     localStorage.removeItem('stms_token')
@@ -31,7 +38,7 @@ export function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
       {children}
     </AuthContext.Provider>
   )

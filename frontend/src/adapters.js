@@ -106,6 +106,8 @@ export function adaptTicket(t) {
     statusHistory:  adaptStatusHistory(t.status_history ?? []),
     sprintId:       t.sprint_id ?? null,
     sprintName:     t.sprint?.name ?? null,
+    csat_score:     t.csat_score ?? null,
+    csat_comment:   t.csat_comment ?? null,
     _raw: t,
   };
 }
